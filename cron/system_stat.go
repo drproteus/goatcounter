@@ -1,106 +1,66 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 package cron
 
 import (
 	"context"
+	"strconv"
 
 	"zgo.at/errors"
-	"zgo.at/gadget"
-	"zgo.at/goatcounter"
+	"zgo.at/goatcounter/v2"
 	"zgo.at/zdb"
-	"zgo.at/zdb/bulk"
 )
 
-// Systems are stored as a count per system/version per day:
-//
-//  site |    day     | system  | version | count
-// ------+------------+---------+---------+------
-//     1 | 2019-12-17 | Chrome  | 38      |    13
-//     1 | 2019-12-17 | Chrome  | 77      |     2
-//     1 | 2019-12-17 | Opera   | 9       |     1
 func updateSystemStats(ctx context.Context, hits []goatcounter.Hit) error {
-	return zdb.TX(ctx, func(ctx context.Context, tx zdb.DB) error {
-		// Group by day + system.
+	return errors.Wrap(zdb.TX(ctx, func(ctx context.Context) error {
 		type gt struct {
-			count       int
-			countUnique int
-			day         string
-			system      string
-			version     string
+			count    int
+			day      string
+			systemID int64
+			pathID   int64
 		}
 		grouped := map[string]gt{}
 		for _, h := range hits {
 			if h.Bot > 0 {
 				continue
 			}
-
-			system, version := getSystem(h.Browser)
-			if system == "" {
+			if h.SystemID == 0 {
 				continue
 			}
 
 			day := h.CreatedAt.Format("2006-01-02")
-			k := day + system + version
+			k := day + strconv.FormatInt(h.SystemID, 10) + strconv.FormatInt(h.PathID, 10)
 			v := grouped[k]
 			if v.count == 0 {
 				v.day = day
-				v.system = system
-				v.version = version
-				var err error
-				v.count, v.countUnique, err = existingSystemStats(ctx, tx,
-					h.Site, day, v.system, v.version)
-				if err != nil {
-					return err
-				}
+				v.systemID = h.SystemID
+				v.pathID = h.PathID
 			}
 
-			v.count += 1
 			if h.FirstVisit {
-				v.countUnique += 1
+				v.count += 1
 			}
 			grouped[k] = v
 		}
 
 		siteID := goatcounter.MustGetSite(ctx).ID
-		ins := bulk.NewInsert(ctx, "system_stats", []string{"site", "day",
-			"system", "version", "count", "count_unique"})
+		ins := zdb.NewBulkInsert(ctx, "system_stats", []string{"site_id", "day",
+			"path_id", "system_id", "count"})
+		if zdb.SQLDialect(ctx) == zdb.DialectPostgreSQL {
+			ins.OnConflict(`on conflict on constraint "system_stats#site_id#path_id#day#system_id" do update set
+				count = system_stats.count + excluded.count`)
+		} else {
+			ins.OnConflict(`on conflict(site_id, path_id, day, system_id) do update set
+				count = system_stats.count + excluded.count`)
+		}
+
 		for _, v := range grouped {
-			ins.Values(siteID, v.day, v.system, v.version, v.count, v.countUnique)
+			if v.count > 0 {
+				ins.Values(siteID, v.day, v.pathID, v.systemID, v.count)
+			}
 		}
 		return ins.Finish()
-	})
-}
-
-func existingSystemStats(
-	txctx context.Context, tx zdb.DB, siteID int64,
-	day, system, version string,
-) (int, int, error) {
-
-	var c []struct {
-		Count       int `db:"count"`
-		CountUnique int `db:"count_unique"`
-	}
-	err := tx.SelectContext(txctx, &c, `/* existingSystemStats */
-		select count, count_unique from system_stats
-		where site=$1 and day=$2 and system=$3 and version=$4 limit 1`,
-		siteID, day, system, version)
-	if err != nil {
-		return 0, 0, errors.Wrap(err, "select")
-	}
-	if len(c) == 0 {
-		return 0, 0, nil
-	}
-
-	_, err = tx.ExecContext(txctx, `delete from system_stats where
-		site=$1 and day=$2 and system=$3 and version=$4`,
-		siteID, day, system, version)
-	return c[0].Count, c[0].CountUnique, errors.Wrap(err, "delete")
-}
-
-func getSystem(uaHeader string) (string, string) {
-	ua := gadget.Parse(uaHeader)
-	return ua.OSName, ua.OSVersion
+	}), "cron.updateSystemStats")
 }

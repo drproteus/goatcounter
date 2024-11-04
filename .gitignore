@@ -1,5 +1,7 @@
 # "go build" binary.
 /goatcounter
+/goatcounter.*
+/goatcounter-*
 
 # UPX creates temporary files.
 *.upx
@@ -16,9 +18,9 @@
 # Default acme-secrets.
 /acme-secrets
 
-# Cached ACME account key.
-acme_account+key
-
 # Coverage reports
 /coverage
 /coverage.*
+
+# Dev log
+/.dev.log

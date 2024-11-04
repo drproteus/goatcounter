@@ -1,221 +1,247 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	_ "time/tzdata"
 
-	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq"           // PostgreSQL database driver.
-	_ "github.com/mattn/go-sqlite3" // SQLite database driver.
 	"zgo.at/errors"
-	"zgo.at/goatcounter/cfg"
-	"zgo.at/goatcounter/db/migrate/gomig"
-	"zgo.at/goatcounter/pack"
+	"zgo.at/goatcounter/v2"
+	"zgo.at/goatcounter/v2/db/migrate/gomig"
 	"zgo.at/zdb"
+	"zgo.at/zdb/drivers"
+	"zgo.at/zdb/drivers/go-sqlite3"
+	_ "zgo.at/zdb/drivers/pq"
+	"zgo.at/zli"
 	"zgo.at/zlog"
+	"zgo.at/zstd/zfs"
 	"zgo.at/zstd/zruntime"
-	"zgo.at/zstd/zstring"
-	"zgo.at/zvalidate"
+	"zgo.at/zstd/zslice"
 )
-
-var version = "dev"
-
-var (
-	stdout = os.Stdout
-	stderr = os.Stderr
-	exit   = os.Exit
-)
-
-var usage = map[string]string{
-	"":         usageTop,
-	"help":     usageHelp,
-	"serve":    usageServe,
-	"create":   usageCreate,
-	"migrate":  usageMigrate,
-	"saas":     usageSaas,
-	"reindex":  usageReindex,
-	"monitor":  usageMonitor,
-	"database": helpDatabase,
-	"db":       helpDatabase,
-	"listen":   helpListen,
-
-	"version": `
-Show version and build information. This is printed as key=value, separated by
-semicolons.
-`,
-}
 
 func init() {
-	errors.Package = "zgo.at/goatcounter"
+	errors.Package = "zgo.at/goatcounter/v2"
 }
 
-const usageTop = `
-Usage: goatcounter [command] [flags]
-
-Commands:
-  help         Show help; use "help <topic>" or "help all" for more details.
-  version      Show version and build information and exit.
-  migrate      Run database migrations.
-  create       Create a new site and user.
-  serve        Start HTTP server.
-
-Advanced commands:
-  reindex      Recreate the index tables (*_stats, *_count) from the hits.
-  monitor      Monitor for pageviews.
-
-Extra help topics:
-  db           Detailed documentation on the -db flag.
-  listen       Detailed documentation on -listen, -tls.
-
-See "help <topic>" for more details for the command.
-`
-
-var CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+type command func(f zli.Flags, ready chan<- struct{}, stop chan struct{}) error
 
 func main() {
-	cfg.Version = version
+	var (
+		f     = zli.NewFlags(os.Args)
+		ready = make(chan struct{}, 1)
+		stop  = make(chan struct{}, 1)
+	)
+	cmdMain(f, ready, stop)
+}
 
-	if len(os.Args) < 2 {
-		fmt.Fprint(stdout, usage[""])
-		exit(0)
+var mainDone sync.WaitGroup
+
+func cmdMain(f zli.Flags, ready chan<- struct{}, stop chan struct{}) {
+	mainDone.Add(1)
+	defer mainDone.Done()
+
+	cmd, err := f.ShiftCommand("help", "version", "serve", "import",
+		"dashboard", "db", "monitor",
+		"saas", "goat")
+	if zslice.ContainsAny(f.Args, "-h", "-help", "--help") {
+		f.Args = append([]string{cmd}, f.Args...)
+		cmd = "help"
+	}
+	if err != nil && !errors.Is(err, zli.ErrCommandNoneGiven{}) {
+		zli.Errorf(usage[""])
+		zli.Errorf("%s", err)
+		zli.Exit(1)
 		return
 	}
-	cmd := os.Args[1]
-	CommandLine.SetOutput(stdout)
-	CommandLine.Usage = func() { fmt.Fprint(stdout, "\n", usage[cmd], "\n") }
 
-	var (
-		code int
-		err  error
-	)
+	var run command
 	switch cmd {
 	default:
-		printMsg(1, usage[""], "unknown command: %q", cmd)
-		code = 1
+		zli.Errorf(usage[""])
+		zli.Errorf("unknown command: %q", cmd)
+		zli.Exit(1)
+	case "", "help":
+		run = cmdHelp
 	case "version":
-		fmt.Fprintln(stdout, getVersion())
-	case "help":
-		code, err = help()
-	case "migrate":
-		code, err = migrate()
-	case "create":
-		code, err = create()
+		fmt.Fprintln(zli.Stdout, getVersion())
+		zli.Exit(0)
+		return
+
+	case "db", "database":
+		run = cmdDB
 	case "serve":
-		code, err = serve()
+		run = cmdServe
 	case "saas":
-		code, err = saas()
-	case "reindex":
-		code, err = reindex()
+		run = cmdSaas
 	case "monitor":
-		code, err = monitor()
-	}
-	if err != nil {
-		// code=1, the user did something wrong and print usage as well
-		// code=2, some internal error, and print just that.
-		if _, ok := err.(zvalidate.Validator); ok {
-			printMsg(code, usage[cmd], err.Error())
+		run = cmdMonitor
+	case "import":
+		run = cmdImport
+	case "dashboard":
+		// Wrap as this also doubles as an example, and these flags just obscure
+		// things.
+		run = func(f zli.Flags, ready chan<- struct{}, stop chan struct{}) error {
+			defer func() { ready <- struct{}{} }()
+			return cmdDashboard(f)
 		}
-		printMsg(code, "", err.Error())
-	}
-
-	exit(code)
-}
-
-func printMsg(code int, usageText, msg string, args ...interface{}) {
-	out := stdout
-	if code > 0 {
-		out = stderr
-	}
-
-	msg = strings.TrimSpace(msg)
-	if msg != "" {
-		fmt.Fprintf(out, msg+"\n", args...)
-	}
-
-	if usageText != "" {
-		if msg != "" {
-			fmt.Fprintf(out, "\n")
-		}
-		fmt.Fprint(out, usageText)
-	}
-}
-
-func flagDB() *string    { return CommandLine.String("db", "sqlite://db/goatcounter.sqlite3", "") }
-func flagDebug() *string { return CommandLine.String("debug", "", "") }
-
-func connectDB(connect string, migrate []string, create bool) (*sqlx.DB, error) {
-	cfg.PgSQL = strings.HasPrefix(connect, "postgresql://") || strings.HasPrefix(connect, "postgres://")
-
-	opts := zdb.ConnectOptions{
-		Connect: connect,
-		Migrate: zdb.NewMigrate(nil, migrate,
-			map[bool]map[string][]byte{true: pack.MigrationsPgSQL, false: pack.MigrationsSQLite}[cfg.PgSQL],
-			map[bool]string{true: "db/migrate/pgsql", false: "db/migrate/sqlite"}[cfg.PgSQL]),
-	}
-	if create {
-		opts.Schema = map[bool][]byte{true: pack.SchemaPgSQL, false: pack.SchemaSQLite}[cfg.PgSQL]
-	}
-	db, err := zdb.Connect(opts)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(migrate) > 0 {
-		err = runGoMigrations(db)
-		return db, err
-	}
-	return db, nil
-}
-
-var goMigrations = map[string]func(zdb.DB) error{
-	"2020-03-27-1-isbot": gomig.IsBot,
-}
-
-func runGoMigrations(db zdb.DB) error {
-	var ran []string
-	err := db.SelectContext(context.Background(), &ran,
-		`select name from version order by name asc`)
-	if err != nil {
-		return errors.Errorf("runGoMigrations: %w", err)
-	}
-
-	ctx := zdb.With(context.Background(), db)
-
-	for k, f := range goMigrations {
-		if zstring.Contains(ran, k) {
-			continue
-		}
-		zlog.Printf("running Go migration %q", k)
-
-		err := zdb.TX(ctx, func(ctx context.Context, db zdb.DB) error {
-			err := f(db)
-			if err != nil {
-				return errors.Errorf("runGoMigrations: running migration %q: %w", k, err)
-			}
-
-			_, err = db.ExecContext(context.Background(), `insert into version values ($1)`, k)
-			if err != nil {
-				return errors.Errorf("runGoMigrations: update version: %w", err)
-			}
+	case "goat":
+		run = func(f zli.Flags, ready chan<- struct{}, stop chan struct{}) error {
+			defer func() { ready <- struct{}{} }()
+			fmt.Print(goat[1:])
 			return nil
-		})
+		}
+
+	case "create":
+		flags := os.Args[2:]
+		for i, ff := range flags {
+			if ff == "-domain" {
+				flags[i] = "-vhost"
+			}
+			if strings.HasPrefix(ff, "-domain=") {
+				flags[i] = "-vhost=" + ff[8:]
+			}
+		}
+		fmt.Fprintf(zli.Stderr,
+			"The create command is moved to \"goatcounter db create site\"\n\n\t$ goatcounter db create site %s\n",
+			strings.Join(flags, " "))
+		zli.Exit(5)
+		return
+	}
+
+	err = run(f, ready, stop)
+	if err != nil {
+		if !slices.Contains(zlog.Config.Debug, "cli-trace") {
+			for {
+				var s *errors.StackErr
+				if !errors.As(err, &s) {
+					break
+				}
+				err = s.Unwrap()
+			}
+		}
+
+		c := 1
+		var stErr interface {
+			Code() int
+			Error() string
+		}
+		if errors.As(err, &stErr) {
+			c = stErr.Code()
+			if c > 255 { // HTTP error.
+				c = 1
+			}
+		}
+
+		if c == 0 {
+			if err.Error() != "" {
+				fmt.Fprintln(zli.Stdout, err.Error())
+			}
+			zli.Exit(0)
+		}
+		zli.Errorf(err)
+		zli.Exit(c)
+		return
+	}
+	zli.Exit(0)
+}
+
+func connectDB(connect, dbConn string, migrate []string, create, dev bool) (zdb.DB, context.Context, error) {
+	if strings.Contains(connect, "://") && !strings.Contains(connect, "+") {
+		connect = strings.Replace(connect, "://", "+", 1)
+		zlog.Errorf(`WARNING: the connection string for -db changed from "engine://connectString" to "engine+connectString"; the ://-variant will work for now, but will be removed in a future release`)
+	}
+
+	var open, idle int
+	if dbConn != "" {
+		openS, idleS, ok := strings.Cut(dbConn, ",")
+		if !ok {
+			return nil, nil, errors.New("-dbconn flag: must be as max_open,max_idle")
+		}
+		var err error
+		open, err = strconv.Atoi(openS)
 		if err != nil {
-			return err
+			return nil, nil, fmt.Errorf("-dbconn flag: %w", err)
+		}
+		idle, err = strconv.Atoi(idleS)
+		if err != nil {
+			return nil, nil, fmt.Errorf("-dbconn flag: %w", err)
 		}
 	}
-	return nil
+
+	fsys, err := zfs.EmbedOrDir(goatcounter.DB, "db", dev)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sqlite3.DefaultHook(goatcounter.SQLiteHook)
+
+	db, err := zdb.Connect(context.Background(), zdb.ConnectOptions{
+		Connect:      connect,
+		Files:        fsys,
+		Migrate:      migrate,
+		GoMigrations: gomig.Migrations,
+		Create:       create,
+		MaxOpenConns: open,
+		MaxIdleConns: idle,
+		MigrateLog:   func(name string) { zlog.Printf("running migration %q", name) },
+	})
+	var pErr *zdb.PendingMigrationsError
+	if errors.As(err, &pErr) {
+		zlog.Errorf("%s; continuing but things may be broken", err)
+		err = nil
+	}
+
+	// TODO: maybe ask for confirmation here?
+	var cErr *drivers.NotExistError
+	if errors.As(err, &cErr) {
+		if cErr.DB == "" {
+			err = fmt.Errorf("%s database at %q exists but is empty.\n"+
+				"Add the -createdb flag to create this database if you're sure this is the right location",
+				cErr.Driver, connect)
+		} else {
+			err = fmt.Errorf("%s database at %q doesn't exist.\n"+
+				"Add the -createdb flag to create this database if you're sure this is the right location",
+				cErr.Driver, cErr.DB)
+		}
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Load languages.
+	var c int
+	err = db.Get(context.Background(), &c, `select count(*) from languages`)
+	// Ignore the error intentionally; not being able to select from the
+	// languages table here to populate it (usually because it doesn't exist
+	// yet) shouldn't be a fatal error. If there's some other error then the
+	// query error will show that one anyway.
+	if err == nil && c == 0 {
+		langs, err := fs.ReadFile(goatcounter.DB, "db/languages.sql")
+		if err != nil {
+			return nil, nil, err
+		}
+		err = db.Exec(context.Background(), string(langs))
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	return db, goatcounter.NewContext(db), nil
 }
 
 func getVersion() string {
 	return fmt.Sprintf("version=%s; go=%s; GOOS=%s; GOARCH=%s; race=%t; cgo=%t",
-		version, runtime.Version(), runtime.GOOS, runtime.GOARCH,
+		goatcounter.Version, runtime.Version(), runtime.GOOS, runtime.GOARCH,
 		zruntime.Race, zruntime.CGO)
 }

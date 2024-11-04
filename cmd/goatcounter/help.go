@@ -1,12 +1,11 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"unicode/utf8"
 
@@ -15,107 +14,102 @@ import (
 )
 
 func printHelp(t string) {
-	fmt.Fprint(stdout, zli.Usage(zli.UsageTrim|zli.UsageHeaders, t))
+	fmt.Fprint(zli.Stdout, zli.Usage(zli.UsageTrim|zli.UsageHeaders, t))
 }
 
-func help() (int, error) {
+func cmdHelp(f zli.Flags, ready chan<- struct{}, stop chan struct{}) error {
+	defer func() { ready <- struct{}{} }()
+
 	zli.WantColor = true
 
-	if len(os.Args) == 2 {
-		printHelp(usage[""])
-		return 0, nil
-	}
-
-	if os.Args[2] == "all" {
-		printHelp(usage[""])
-		fmt.Println()
-		for _, h := range []string{
-			"help", "version",
-			"migrate", "create", "serve",
-			"reindex", "monitor",
-			"db", "listen",
-		} {
-			head := fmt.Sprintf("─── Help for %q ", h)
-			fmt.Fprintf(stdout, "%s%s\n\n",
-				zli.Colorf(head, zli.Bold),
-				strings.Repeat("─", 80-utf8.RuneCountInString(head)))
-			printHelp(usage[h])
-			fmt.Println()
+	// Don't parse any flags, just grep out non-flags and print help for those.
+	//
+	// TODO: would be better if zli.Flags would continue parsing after an
+	// unknown flag, as "-site 1" will try to load the help for "1". Still,
+	// being able to add "-h" at the end of a command is pretty convenient IMO.
+	var topics []string
+	for _, a := range f.Args {
+		if len(a) == 0 || a[0] == '-' {
+			continue
 		}
-		return 0, nil
+		if a == "all" {
+			topics = []string{"help", "version", "serve", "import",
+				"dashboard", "db", "monitor", "listen", "logfile", "debug"}
+			break
+		}
+		topics = append(topics, strings.ToLower(a))
 	}
 
-	t, ok := usage[os.Args[2]]
-	if !ok {
-		return 1, errors.Errorf("no help topic for %q", os.Args[2])
+	switch len(topics) {
+	case 0:
+		printHelp(usage[""])
+	case 1:
+		text, ok := usage[topics[0]]
+		if !ok {
+			return errors.Errorf("no help topic for %q", topics[0])
+		}
+		printHelp(text)
+	default:
+		for _, t := range topics {
+			text, ok := usage[t]
+			if !ok {
+				return errors.Errorf("no help topic for %q", t)
+			}
+
+			head := fmt.Sprintf("─── Help for %q ", t)
+			fmt.Fprintf(zli.Stdout, "%s%s\n\n",
+				zli.Colorize(head, zli.Bold),
+				strings.Repeat("─", 80-utf8.RuneCountInString(head)))
+			printHelp(text)
+			fmt.Fprintln(zli.Stdout, "")
+		}
 	}
-	printHelp(t)
-	return 0, nil
+	return nil
 }
+
+var usage = map[string]string{
+	"":          usageTop,
+	"help":      usageHelp,
+	"serve":     usageServe,
+	"saas":      usageSaas,
+	"monitor":   usageMonitor,
+	"import":    usageImport,
+	"dashboard": usageDashboard,
+	"db":        helpDB,
+	"listen":    helpListen,
+	"logfile":   helpLogfile,
+	"debug":     helpDebug,
+
+	"version": `
+Show version and build information. This is printed as key=value, separated by
+semicolons.
+`,
+}
+
+const usageTop = `Usage: goatcounter [command] [flags]
+
+GoatCounter is a web analytics platform. https://github.com/arp242/goatcounter
+Use "help <topic>" or "cmd -h" for more details for a command or topic.
+
+Commands:
+  help         Show help; use "help <topic>" or "help all" for more details.
+  version      Show version and build information and exit.
+  serve        Start HTTP server.
+  import       Import pageviews from an export or logfile.
+
+  dashboard    Show dashboard statistics in the terminal.
+  db           Modify the database and print database info.
+  monitor      Monitor for pageviews.
+
+Extra help topics:
+  listen       Detailed documentation on -listen and -tls flags.
+  logfile      Documentation on importing from logfiles.
+  debug        List of modules accepted by the -debug flag.
+`
 
 const usageHelp = `
 Show help; use "help commands" to dispay detailed help for a command, or "help
 all" to display everything.
-`
-
-const helpDatabase = `
-GoatCounter can use SQLite and PostgreSQL. All commands accept the -db flag to
-customize the database connection string.
-
-You can select a database engine by using "sqlite://[..]" for SQLite, or
-"postgresql://[..]" (or "postgres://[..]") for PostgreSQL.
-
-There are no plans to support other database engines such as MySQL/MariaDB.
-
-SQLite:
-
-    This is the default database engine as it has no dependencies, and for most
-    small to medium usage it should be more than fast enough.
-
-    The SQLite connection string is usually just a filename, optionally prefixed
-    with "file:". Parameters can be added as a URL query string after a ?:
-
-        -db 'sqlite://mydb.sqlite?param=value&other=value'
-
-    See the go-sqlite3 documentation for a list of supported parameters:
-    https://github.com/mattn/go-sqlite3/#connection-string
-
-    _journal_mode=wal is always added unless explicitly overridden. Generally
-    speaking using a Write-Ahead-Log is more suitable for GoatCounter than the
-    default DELETE journaling.
-
-    The database is automatically created for the "serve" command, but you need
-    to add -createdb to any other commands to create the database. This is to
-    prevent accidentally operating on the wrong (new) database.
-
-PostgreSQL:
-
-    PostgreSQL provides better performance for large instances. If you have
-    millions of pageviews then PostgreSQL is probably a better choice.
-
-    The PostgreSQL connection string can either be as "key=value" or as an URL;
-    the following are identical:
-
-        -db 'postgresql://user=pqgotest dbname=pqgotest sslmode=verify-full'
-        -db 'postgresql://pqgotest:password@localhost/pqgotest?sslmode=verify-full'
-
-    See the pq documentation for a list of supported parameters:
-    https://pkg.go.dev/github.com/lib/pq?tab=doc#hdr-Connection_String_Parameters
-
-    You may want to consider lowering the "seq_page_cost" parameter; the query
-    planner tends to prefer seq scans instead of index scans for some operations
-    with the default of 4, which is much slower.
-
-    I found that 0.5 is a fairly good setting, you can set it in your
-    postgresql.conf file, or just for one database with:
-
-        alter database goatcounter set seq_page_cost=.5
-
-    The database isn't automatically created for PostgreSQL, you'll have to
-    manually create it first:
-
-        createdb goatcounter
-        psql goatcounter < ./db/schema.pgsql
 `
 
 const helpListen = `
@@ -132,7 +126,7 @@ verification server.
 This is why GoatCounter listens on port 80 by default, which should work well
 for most people.
 
-listen and tls flags:
+The -listen and -tls flags:
 
     You can change the main port GoatCounter listens on with the -listen flag.
     This works like most applications, for example:
@@ -140,17 +134,19 @@ listen and tls flags:
         -listen localhost:8081     Listen on localhost:8081
         -listen :8081              Listen on :8081 for all addresses
 
-    The -tls flag controls the TLS setup, as well as redirecting port 80 the
-    -listen port with a 301 status code. Because there are a few different
-    server setups GoatCounter can be used in, the flag accepts a bunch of
-    different options as a comma-separated list with any combination of:
+    The -tls flag controls the TLS setup, as well as redirecting port 80 to the
+    -listen port with a 301. The flag accepts a bunch of different options as a
+    comma-separated list with any combination of:
 
-        none        Don't serve any TLS; this is the same as just leaving it
-                    blank (-tls '') but more explicit/readable.
+        http        Don't serve any TLS; you can still generate ACME
+                    certificates though.
 
-        tls         Accept TLS connections on -listen; if this isn't added it
-                    will accept regular non-https connections, but may still
-                    generate certificates with ACME (useful for proxy or dev).
+        proxy       Don't serve any TLS. Similar to "http" but hint that TLS
+                    will be handled by a proxy (such as Hitch, Nginx, etc.)
+
+        tls         Accept TLS connections on -listen. This is always done
+                    unless "http" or "proxy" are added so this is never needed,
+                    but can be useful to clarify that TLS is used.
 
         rdr         Redirect port 80 to the -listen port; as mentioned it's
                     required for Let's Encrypt to be available on port 80. You
@@ -168,7 +164,7 @@ listen and tls flags:
         file.pem    TLS certificate and keyfile, in one file. This can be used
                     as an alternative to Let's Encrypt if you already have a
                     certificate from your domain from a CA. This can use used
-                    multiple times (e.g. "-tls tls,file1.pem,file2.pem").
+                    multiple times (e.g. "-tls file1.pem,file2.pem").
 
                     This can also be combined with the acme option: GoatCounter
                     will try to use a certificate file for the domain first, and
@@ -177,21 +173,25 @@ listen and tls flags:
 
     Some common examples:
 
-        tls,acme,rdr
-            This is the default setting.
+        -tls acme,rdr
+            This is the default setting: serve on TLS, redirect port 80, and
+            generate ACME certificates.
 
-        tls,rdr,acme:/home/gc/.acme
+        -tls rdr,acme:/home/gc/.acme
             The default setting, but with a different cache directory.
 
-        tls,/etc/tls/stats.example.com.pem
+        -tls /etc/tls/stats.example.com.pem
             Don't use ACME, but use a certificate from a CA. No port 80 redirect.
+
+        -tls http
+            Don't serve over TLS, but use regular unencrypted HTTP.
 
 Proxy Setup:
 
     If you want to serve GoatCounter behind a proxy (HAproxy, Varnish, Hitch,
     nginx, Caddy, whatnot) then you'll want to use something like:
 
-        goatcounter -listen localhost:8081 -tls none
+        goatcounter serve -listen localhost:8081 -tls proxy
 
     And then forward requests on port 80 and 443 for your domain to
     localhost:8081. This assumes that the proxy will take care of the TLS
@@ -199,7 +199,7 @@ Proxy Setup:
 
     You can still use GoatCounter's ACME if you want:
 
-        goatcounter -listen localhost:8081 -tls tls,acme
+        goatcounter serve -listen localhost:8081 -tls proxy,acme
 
     You will have to make the proxy reads the *.pem files from the acme cache
     directory. You may have to reload or restart the proxy for it to pick up new
@@ -219,13 +219,34 @@ Proxy Setup:
 Using a non-standard port:
 
     If you make GoatCounter publicly accessibly on non-standard port (i.e. not
-    80 or 443) then you must add the -port flag to tell GoatCounter which port
-    to use in various redirects, messages, and emails:
+    80 or 443) then you must add the -public-port flag to tell GoatCounter which
+    port to use in various redirects, messages, and emails:
 
-        goatcounter -listen :9000 -port 9000
+        goatcounter serve -listen :9000 -public-port 9000
 
     This may seem redundant, but it's hard for GoatCounter to tell if it's
     accessible on :9000 or if there's a proxy in front of it redirecting :80 and
     :443 to :9000. Since most people will use the standard ports you need to
     explicitly tell GoatCounter to use a non-standard port.
+`
+
+const helpDebug = `
+List of debug modules for the -debug flag; you can add multiple separated by
+commas.
+
+    all            Show debug logs for all of the below.
+
+    acme           ACME certificate creation.
+    cli-trace      Show stack traces in errors on the CLI.
+    cron           Background "cron" jobs.
+    cron-acme      Cron jobs for ACME certificate creations.
+    dashboard      Dashboard view.
+    export         Export creation.
+    import         Imports.
+    import-api     Imports from the API.
+    memstore       Storing of pageviews in the database.
+    monitor        Additional logs in "goatcounter monitor" .
+    session        Internal "session" generation to track visitors .
+    startup        Some additional logs during startup.
+    vacuum         Deletion of old deleted sites and old pageviews.
 `

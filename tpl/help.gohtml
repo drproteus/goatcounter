@@ -1,134 +1,121 @@
-{{template "_top.gohtml" .}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	{{template "_favicon.gohtml" .}}
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="description" content="{{.MetaDesc}}">
+	<title>GoatCounter documentation</title>
+	<link rel="stylesheet" href="{{.Static}}/vars.css?v={{.Version}}">
+	{{if eq .User.Settings.Theme "dark"}}
+		<link rel="stylesheet" href="{{.Static}}/dark.css?v={{.Version}}">
+	{{end}}
+	<style>
+		@font-face {
+			font-family: 'Lato'; font-style: normal; font-weight: 400; font-display: fallback;
+			src: local('Lato'), local('Lato Regular'),
+				url('{{.Static}}/fonts/latolatin.woff2') format('woff2');
+		}
+		@font-face {
+			font-family: 'Lato'; font-style: normal; font-weight: 700; font-display: fallback;
+			src: local('Lato Bold'), local('Lato Bold'),
+				url('{{.Static}}/fonts/latolatin-bold.woff2') format('woff2');
+		}
+		@font-face {
+			font-family: 'Lato'; font-style: italic; font-weight: 400; font-display: fallback;
+			src: local('Lato Italic'), local('Lato Italic'),
+				url('{{.Static}}/fonts/latolatin-italic.woff2') format('woff2');
+		}
+	</style>
+	<link rel="stylesheet" href="{{.Static}}/shared.css?v={{.Version}}">
+	<link rel="stylesheet" href="{{.Static}}/style.css?v={{.Version}}">
+	<link rel="canonical" href="https://{{.Domain}}/{{.Page}}/{{.CodePage}}">
 
-<h1>GoatCounter documentation</h1>
+<style>
+footer.center       { margin-top: 2em; }
+nav.center          { max-width: 80em; padding-left: 19em; }
 
-<p>
-	Other documentation pages:<br>
-	<a href="/gdpr">GDPR consent notices</a> |
-	<a href="/code">Site integration code</a> |
-	<a href="/privacy">Privacy policy</a> |
-	<a href="/terms">Terms of use</a>
-</p>
+.code-wrap          { display: flex; max-width: 80em; }
+.code-wrap >div     { overflow: hidden; padding: 6px; margin: -6px; margin-right: 6px; }
+.code-nav           { flex-shrink: 0; width: 18em; height: 100%; padding: .5em; margin-right: .6em;
+				      background-color: var(--nav-bg); color: var(--text); box-shadow: 0 0 4px var(--box-shadow); }
+.code-nav select    { display: none; }
+.code-nav ul        { list-style: none; margin: 0; padding: 0; }
+.code-nav a         { display: block; margin: .3em 0; padding-left: .3em; border-left: 3px solid transparent; }
+.code-nav li >ul a  { margin-left: .5em; }
+.code-nav .active a { border-left-color: #999; }
+.code-nav strong    { font-size: .9rem; }
+.page-code          { padding: 1em; background-color: var(--bg); box-shadow: 0 0 6px rgba(0,0,0,.2); }
+h3                  { margin-bottom: .2em; }
+h3 + p              { margin-top: 0; }
+h4                  { margin-bottom: .2em; }
+h4 + p              { margin-top: 0; }
+hr                  { margin: 0; }
 
-<h2>FAQ</h2>
+.pre-copy-wrap { position: relative; }
+.pre-copy      { position: absolute; right: 0; top: calc(-2em - 1px); padding: .3em 1em;
+				 color: #000; background-color: #f5f5f5; border-top: 1px solid #d5d5d5; border-left: 1px solid #d5d5d5; }
 
-<h3 id="general">General <a href="#general"></a></h3>
-<dl>
-	<dt id="no-pageviews">I don’t see my pageviews? <a href="#no-pageviews">§</a></dt>
-	<dd>For reasons of efficiency the statistics are updated once every 10
-	seconds.</dd>
+#vc-example    { display: flex; justify-content: space-around; flex-wrap: wrap; text-align: center; }
+#vc-example >* { width: 200px; }
 
-	<dt id="no-data">What does <em>(no data)</em> mean in the referrers list? <a href="#no-data">§</a></dt>
-	<dd>No Referer was sent; this can mean that the user directly accessed the
-		URL (e.g. from their bookmarks or typing it), that they disabled sending the
-		Referer header, or that the link they clicked on disabled the Referer header
-		with <code>rel="noreferer"</code>.
-	</dd>
+@media (min-height: 46rem) {
+	.code-nav { position: sticky; top: 0; }
+}
 
+@media (max-width: 50rem) {
+	nav.center       { padding-left: 1em; }
+	.code-wrap       { flex-direction: column; padding: 0; }
+	.code-wrap >div  { margin: 0; padding: 0; }
+	.code-nav        { position: sticky; top: 0; z-index: 10; width: auto; margin-bottom: 1em; }
+	.code-nav ul     { display: none; }
+	.code-nav select { display: block;  width: 100%; }
+}
+</style>
+</head>
 
-	<dt id="bots">How are bots and crawlers counted? <a href="#bots">§</a></dt>
-	<dd>They’re not; all bots and crawlers that identify themselves as such are ignored.<br>
-		It’s easy for a malicious script to disguise itself as Firefox or
-		Chrome, and it’s hard to reliably detect this. In practice it’s unlikely
-		that 100% of all bots are ignored (this is a general problem with
-		analytics, and not specific to GoatCounter).</dd>
+<body>
+	<nav class="center">
+		<strong id="back"><a href="{{.Base}}/">←&#xfe0e; {{if .Site}}Dashboard{{else}}Home{{end}}</a></strong>
+	</nav>
 
-	<dt id="dnt">How is the <code>Do-Not-Track</code> header handled? <a href="#dnt">§</a></dt>
-	<dd>It’s ignored for several reasons: it’s effectively abandoned with a low
-		adoption rate, mostly intended for persistent cross-site tracking (which
-		GoatCounter doesn’t do), and I feel there are some fundamental concerns
-		with the approach. See
-		<a href="https://www.arp242.net/dnt.html" target="_blank" rel="noopener">Why GoatCounter ignores Do Not Track</a>
-		for a more in-depth explanation.
-		<br><br>
-		You can still implement it yourself by putting this at the start of the
-		GoatCounter script:
-<pre>&lt;script&gt;
-	window.goatcounter = {
-		no_onload: ('doNotTrack' in navigator && navigator.doNotTrack === '1'),
-	};
-&lt;/script&gt;
-&lt;script data-goatcounter="[..]"
-        async src="//gc.zgo.at/count.js"&gt;&lt;/script&gt;</pre>
-	</dd>
+	<div class="center code-wrap">
+		<nav class="code-nav">
+			{{help_nav .Context .CodePage}}
+		</nav>
 
-	<dt id="gdpr">What about GDPR consent notices? <a href="#gdpr">§</a></dt>
-	<dd>GoatCounter does not collect data which can be used to identify a
-		person, and you almost certainly don’t need to ask for consent
-		See Recital 26, <em>“Not applicable to anonymous data”</em>.
-		See <a href="/gdpr">the GDPR page</a> for details.
-	</dd>
+		<div>
+			<div class="page-code">
+				{{- if .Flash}}<div class="flash flash-{{.Flash.Level}}">{{.Flash.Message}}</div>{{end -}}
 
-	<dt id="custom-domain">How do I set up a custom domain? <a href="#custom-domain">§</a></dt>
-	<dd>
-		Add a <code>CNAME</code> record pointing to your GoatCounter subdomain:
-		<pre>stats   IN CNAME    mine.{{.Domain}}.</pre>
+				<h1>{{help_hdr .Context .CodePage}}</h1>
+				{{markdown .CodePage .}}
+			</div>
 
-		Then update the GoatCounter settings with your custom domain. It might
-		take a few hours for everything to work. <code>mine.{{.Domain}}</code>
-		will continue to work.<br><br>
+			<h2 style="border:0; margin-bottom: .2rem; margin-left: .5rem;">Questions or problems?</h2>
+			<div class="page-code">
+				<p style="margin-top: 0">Feel free to get in touch if you’ve got any questions or having any problems; a
+				lot of times they can be resolved without too much problems.</p>
 
-		You will need a Business plan to set up a custom domain.
-	</dd>
+				<p>Ways to contact me: <a href="#" class="show-contact">show</a> </p>
+				<div style="display: none;" class="contact">
+					{{template "_contact.gohtml" (map "v" .Validate "r" (printf "/help/%s" .CodePage) "a" .Args "Base" .Base)}}
+				</div>
+			</div>
+		</div>
+	</div>
 
-	<dt id="status-code">Is there any way to record HTTP status codes? <a href="#status-code">§</a></dt>
-	<dd>
-		Not directly, but if you include the status code in your error page’s
-		title you can filter by it. Also see
-		<a href="https://github.com/zgoat/goatcounter/issues/3#issuecomment-578202761">issue #3</a>.
-	</dd>
+	{{template "_bottom_links.gohtml" .}}
 
-	<dt id="verify-email">Why do I need to verify my email? <a href="#verify-email">§</a></dt>
-	<dd>
-		Having some means of contact is useful in case of questions, problems,
-		or other reasons for communicating.
-		<br>
-		For example, if you’re sending many (millions) of pageviews then I’d rather
-		contact you to discuss options than just shut down the account. Not
-		having any means to get in touch would leave me in an awkward position.
-	</dd>
-</dl>
+	{{if .Dev}}
+		<script data-goatcounter="//goatcounter.{{.Domain}}/count"
+				data-goatcounter-settings='{"allow_local":true}'
+				async src="{{.Static}}/count.js"></script>
+	{{else}}
+		<script data-goatcounter="https://goatcounter.goatcounter.com/count"
+				async src="//gc.zgo.at/count.js"></script>
+	{{end}}
 
-<h3 id="billing">Pricing and billing <a href="#billing"></a></h3>
-<dl>
-	<dt id="exceed-plan">What happens if I go over the amount of pageviews for my plan? <a href="#exceed-plan">§</a></dt>
-	<dd>I’ll be in touch if you consistently go over the number over pageviews,
-		but there is no automated process to shut down accounts or anything like
-		that. It’s not a problem if you go over the pageviews in a single spike
-		of traffic because you wrote something that got shared a lot.</dd>
-
-	<dt id="commercial">What is “Commercial Use”? <a href="#commercial">§</a></dt>
-	<dd>A website is considered “commercial” if the primary goal is to sell or
-		advertise paid products or services.<br><br>
-
-		There is a large amount of grey area between strictly ‘personal’ and
-		‘commercial’; for example selling a service as a side-project which
-		provides just a little bit of pocket money is ‘commercial’, but also
-		‘personal’. As a rule, things like “pocket-money side-projects” are
-		considered personal, especially if they’re open source. Just get in
-		touch if you’re unsure and I’ll tell you if it’s considered personal.
-	</dd>
-
-	<dt id="charity">Is there any discount for charities, non-profit organisations, startups, etc? <a href="#charity">§</a></dt>
-	<dd>
-		The short answer is ”not really”. The longer answer is that it depends
-		on the individual case.<br><br>
-
-		To give an example, Amnesty International is undoubtedly a charity doing
-		great work, and I’d be honoured to facilitate that. But they also have a
-		~€300 million/year income and it seems to me that asking them for
-		€15/month so I can make a living isn't unreasonable, regardless of their
-		charitable work. After all, people employed by Amnesty are getting paid
-		too, and I also need to pay my rent, food, etc. 😅<br><br>
-
-		Most charities don’t have the kind of endowment Amnesty has, so if
-		you’re running a small charity, non-profit, or one-person startup where
-		€15/month would be a prohibitively large cost then feel free to get in
-		touch and we’ll see what we can arrange.<br><br>
-
-		I’ll be happy to revisit this policy once GoatCounter starts becoming
-		financially sustainable, but right now it’s still quite far from that.
-	</dd>
-</dl>
-
-{{template "_bottom.gohtml" .}}
+	<script crossorigin="anonymous" src="{{.Static}}/jquery.js?v={{.Version}}"></script>
+	<script crossorigin="anonymous" src="{{.Static}}/help.js?v={{.Version}}"></script>
+</body>
+</html>

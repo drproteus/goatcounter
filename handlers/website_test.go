@@ -1,6 +1,6 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 package handlers
 
@@ -9,60 +9,50 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"zgo.at/goatcounter"
-	"zgo.at/goatcounter/cfg"
+	"github.com/go-chi/chi/v5"
+	"zgo.at/zdb"
 )
 
+func newWebsite(db zdb.DB) chi.Router { return NewWebsite(db, true) }
+
 func TestWebsiteTpl(t *testing.T) {
-	tests := []handlerTest{
-		{
-			name:     "index",
-			router:   NewWebsite,
-			path:     "/",
-			wantCode: 200,
-			wantBody: "doesn’t track users with",
-		},
-		{
-			name:     "help",
-			router:   NewWebsite,
-			path:     "/help",
-			wantCode: 200,
-			wantBody: "I don’t see my pageviews?",
-		},
-		{
-			name:     "privacy",
-			router:   NewWebsite,
-			path:     "/privacy",
-			wantCode: 200,
-			wantBody: "Screen size",
-		},
-		{
-			name:     "terms",
-			router:   NewWebsite,
-			path:     "/terms",
-			wantCode: 200,
-			wantBody: "The “services” are any software, application, product, or service",
-		},
+	tests := []struct {
+		path, want string
+	}{
+		{"/", "doesn’t track users with"},
+		{"/help/privacy", "Screen size"},
+		{"/help/terms", "The “services” are any software, application, product, or service"},
+		{"/why", "Footnotes"},
+		{"/design", "Firefox on iOS is just displayed as Safari"},
+		{"/help/translating", "translate GoatCounter"},
+		{"/status", "uptime"},
+		{"/signup", `<label for="email">Email address</label>`},
+		{"/user/forgot", "Forgot domain"},
 
-		{
-			name:     "status",
-			router:   NewWebsite,
-			path:     "/status",
-			wantCode: 200,
-			wantBody: "uptime",
-		},
+		{"/help/start", "Getting started"},
 
-		{
-			name:     "signup",
-			router:   NewWebsite,
-			path:     "/signup",
-			wantCode: 200,
-			wantBody: `<label for="email">Email address</label>`,
-		},
+		// Shared
+
+		// rdr
+		// {"/api", "Backend integration"},
+
+		//{"/help", "I don’t see my pageviews?"},
+		{"/help/gdpr", "consult a lawyer"},
+		{"/contact", "Send message"},
+		{"/contribute", "Contribute"},
+		{"/api.html", "Endpoints"},
+		{"/api2.html", "<rapi-doc"},
+		{"/api.json", `"consumes"`},
 	}
 
 	for _, tt := range tests {
-		runTest(t, tt, nil)
+		runTest(t, handlerTest{
+			name:     tt.path,
+			path:     tt.path,
+			router:   newWebsite,
+			wantCode: 200,
+			wantBody: tt.want,
+		}, nil)
 	}
 }
 
@@ -71,7 +61,7 @@ func TestWebsiteSignup(t *testing.T) {
 		{
 			name:         "basic",
 			method:       "POST",
-			router:       NewWebsite,
+			router:       newWebsite,
 			path:         "/signup",
 			body:         signupArgs{Code: "xxx", Email: "m@example.com", TuringTest: "9", Password: "coconuts"},
 			wantCode:     303,
@@ -81,7 +71,7 @@ func TestWebsiteSignup(t *testing.T) {
 		{
 			name:         "no-code",
 			method:       "POST",
-			router:       NewWebsite,
+			router:       newWebsite,
 			path:         "/signup",
 			body:         signupArgs{Email: "m@example.com", TuringTest: "9", Password: "coconuts"},
 			wantCode:     200,
@@ -91,7 +81,6 @@ func TestWebsiteSignup(t *testing.T) {
 		},
 	}
 
-	cfg.Plan = goatcounter.PlanPersonal
 	for _, tt := range tests {
 		runTest(t, tt, func(t *testing.T, rr *httptest.ResponseRecorder, r *http.Request) {
 			// TODO: test state

@@ -1,6 +1,6 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 package goatcounter
 
@@ -8,18 +8,20 @@ import (
 	"context"
 	"net/url"
 	"strings"
-	"time"
 
 	"zgo.at/errors"
+	"zgo.at/zcache"
 	"zgo.at/zdb"
+	"zgo.at/zstd/ztime"
+	"zgo.at/zstd/ztype"
 )
 
 // ref_scheme column
 var (
-	RefSchemeHTTP      = ptr("h")
-	RefSchemeOther     = ptr("o")
-	RefSchemeGenerated = ptr("g")
-	RefSchemeCampaign  = ptr("c")
+	RefSchemeHTTP      = ztype.Ptr("h")
+	RefSchemeOther     = ztype.Ptr("o")
+	RefSchemeGenerated = ztype.Ptr("g")
+	RefSchemeCampaign  = ztype.Ptr("c")
 )
 
 var groups = map[string]string{
@@ -64,6 +66,13 @@ var groups = map[string]string{
 	"org.telegram.messenger": "Telegram Messenger",
 
 	"com.Slack": "Slack Chat",
+
+	// Baidu
+	"baidu.com":         "Baidu",
+	"c.tieba.baidu.com": "Baidu",
+	"m.baidu.com":       "Baidu",
+	"tieba.baidu.com":   "Baidu",
+	"www.baidu.com":     "Baidu",
 }
 
 var hostAlias = map[string]string{
@@ -76,6 +85,71 @@ var hostAlias = map[string]string{
 	"fr.reddit.com":      "www.reddit.com",
 }
 
+type Ref struct {
+	ID        int64   `db:"ref_id"`
+	Ref       string  `db:"ref"`
+	RefScheme *string `db:"ref_scheme"`
+}
+
+func (r *Ref) Defaults(ctx context.Context) {}
+
+func (r *Ref) Validate(ctx context.Context) error {
+	v := NewValidate(ctx)
+
+	//v.Required("ref", r.Ref)
+	//v.Required("ref_scheme", r.RefScheme)
+
+	v.UTF8("ref", r.Ref)
+	v.Len("ref", r.Ref, 0, 2048)
+
+	return v.ErrorOrNil()
+}
+
+func (r *Ref) GetOrInsert(ctx context.Context) error {
+	k := r.Ref
+	if r.RefScheme != nil {
+		k += string(*r.RefScheme)
+	}
+	if r.Ref == "" && r.RefScheme == nil {
+		r.ID = 1
+		return nil
+	}
+	c, ok := cacheRefs(ctx).Get(k)
+	if ok {
+		*r = c.(Ref)
+		cacheRefs(ctx).Touch(k, zcache.DefaultExpiration)
+		return nil
+	}
+
+	r.Defaults(ctx)
+	err := r.Validate(ctx)
+	if err != nil {
+		return err
+	}
+
+	err = zdb.Get(ctx, r, `/* Ref.GetOrInsert */
+		select * from refs
+		where lower(ref) = lower(?) and ref_scheme = ?
+		limit 1`, r.Ref, r.RefScheme)
+	if err == nil {
+		cacheRefs(ctx).SetDefault(k, *r)
+		return nil
+	}
+	if !zdb.ErrNoRows(err) {
+		return errors.Wrap(err, "Ref.GetOrInsert get")
+	}
+
+	r.ID, err = zdb.InsertID(ctx, "ref_id",
+		`insert into refs (ref, ref_scheme) values (?, ?)`,
+		r.Ref, r.RefScheme)
+	if err != nil {
+		return errors.Wrap(err, "Ref.GetOrInsert insert")
+	}
+
+	cacheRefs(ctx).SetDefault(k, *r)
+	return nil
+}
+
 func cleanRefURL(ref string, refURL *url.URL) (string, bool) {
 	// I'm not sure where these links are generated, but there are *a lot* of
 	// them.
@@ -84,10 +158,8 @@ func cleanRefURL(ref string, refURL *url.URL) (string, bool) {
 	}
 
 	// Always remove protocol.
+	ref = strings.TrimPrefix(ref, refURL.Scheme)
 	refURL.Scheme = ""
-	if p := strings.Index(ref, ":"); p > -1 && p < 7 {
-		ref = ref[p+3:]
-	}
 
 	// Normalize some hosts.
 	if a, ok := hostAlias[refURL.Host]; ok {
@@ -95,10 +167,15 @@ func cleanRefURL(ref string, refURL *url.URL) (string, bool) {
 	}
 
 	// Group based on URL.
-	if strings.HasPrefix(refURL.Host, "www.google.") {
+	if strings.HasPrefix(refURL.Host, "www.google.") || strings.HasPrefix(refURL.Host, "google.") {
 		// Group all "google.co.nz", "google.nl", etc. as "Google".
 		return "Google", true
 	}
+
+	if strings.Contains(refURL.Host, "search.yahoo.com") {
+		return "Yahoo", true
+	}
+
 	if g, ok := groups[refURL.Host]; ok {
 		return g, true
 	}
@@ -123,7 +200,7 @@ func cleanRefURL(ref string, refURL *url.URL) (string, bool) {
 	// getpocket.com/a/read/2580004052
 	// getpocket.com/recommendations
 	// getpocket.com/redirect
-	// getpocket.com/users/XXX/feed/read
+	// getpocket.com/users/AAA/feed/read
 	if refURL.Host == "getpocket.com" || refURL.Host == "app.getpocket.com" {
 		return "getpocket.com", false
 	}
@@ -147,7 +224,7 @@ func cleanRefURL(ref string, refURL *url.URL) (string, bool) {
 
 	// Linking https://t.co/c3MITw38Yq isn't too useful as that will link back
 	// to the page, so link to the Tweet instead.
-	if refURL.Host == "t.co" {
+	if refURL.Host == "t.co" && len(refURL.Path) > 1 {
 		return "twitter.com/search?q=https%3A%2F%2Ft.co" +
 			url.QueryEscape(refURL.Path), false
 	}
@@ -162,92 +239,36 @@ func cleanRefURL(ref string, refURL *url.URL) (string, bool) {
 	q := refURL.Query()
 	refURL.RawQuery = ""
 
-	// Google analytics tracking parameters.
-	q.Del("utm_source")
+	q.Del("utm_source") // Google analytics tracking parameters.
 	q.Del("utm_medium")
 	q.Del("utm_campaign")
 	q.Del("utm_term")
+	q.Del("utm_content")
 
-	if len(q) == 0 {
-		return refURL.String()[2:], false
+	q.Del("__cf_chl_captcha_tk__") // Cloudflare
+	q.Del("__cf_chl_jschl_tk__")
+
+	s := refURL.String()
+	if len(s) > 1 {
+		return s[2:], false
 	}
-	return refURL.String()[2:], false
+	return "/", false
 }
 
-// ListRefsByPath lists all references for a path.
-func (h *Stats) ListRefsByPath(ctx context.Context, path string, start, end time.Time, offset int) error {
-	site := MustGetSite(ctx)
-
-	limit := site.Settings.Limits.Ref
-	if limit == 0 {
-		limit = 10
-	}
-
-	err := zdb.MustGet(ctx).SelectContext(ctx, &h.Stats, `/* Stats.ListRefsByPath */
-		select
-			coalesce(sum(total), 0) as count,
-			coalesce(sum(total_unique), 0) as count_unique,
-			max(ref_scheme) as ref_scheme,
-			ref as name
-		from ref_counts
-		where
-			site=$1 and
-			lower(path)=lower($2) and
-			hour>=$3 and
-			hour<=$4
-		group by ref
-		order by count_unique desc, ref desc
-		limit $5 offset $6`,
-		site.ID, path, start.Format(zdb.Date), end.Format(zdb.Date), limit+1, offset)
+// ListRefsByPath lists all references for a pathID.
+func (h *HitStats) ListRefsByPathID(ctx context.Context, pathID int64, rng ztime.Range, limit, offset int) error {
+	err := zdb.Select(ctx, &h.Stats, "load:ref.ListRefsByPathID.sql", map[string]any{
+		"site":   MustGetSite(ctx).ID,
+		"start":  rng.Start,
+		"end":    rng.End,
+		"path":   pathID,
+		"limit":  limit + 1,
+		"offset": offset,
+	})
 
 	if len(h.Stats) > limit {
 		h.More = true
 		h.Stats = h.Stats[:len(h.Stats)-1]
 	}
-
-	return errors.Wrap(err, "Stats.ListRefsByPath")
-}
-
-// ListTopRefs lists all ref statistics for the given time period, excluding
-// referrals from the configured LinkDomain.
-//
-// The returned count is the count without LinkDomain, and is different from the
-// total number of hits.
-func (h *Stats) ListTopRefs(ctx context.Context, start, end time.Time, offset int) error {
-	site := MustGetSite(ctx)
-
-	limit := site.Settings.Limits.Hchart
-	if limit == 0 {
-		limit = 6
-	}
-
-	where := ` where site=? and hour>=? and hour<=?`
-	args := []interface{}{site.ID, start.Format(zdb.Date), end.Format(zdb.Date)}
-	if site.LinkDomain != "" {
-		where += " and ref not like ? "
-		args = append(args, site.LinkDomain+"%")
-	}
-
-	db := zdb.MustGet(ctx)
-	err := db.SelectContext(ctx, &h.Stats, db.Rebind(`/* Stats.ListTopRefs */
-		select
-			coalesce(sum(total), 0) as count,
-			coalesce(sum(total_unique), 0) as count_unique,
-			max(ref_scheme) as ref_scheme,
-			ref as name
-		from ref_counts`+
-		where+`
-		group by ref
-		order by count_unique desc
-		limit ? offset ?`), append(args, limit+1, offset)...)
-	if err != nil {
-		return errors.Wrap(err, "Stats.ListAllRefs")
-	}
-
-	if len(h.Stats) > limit {
-		h.More = true
-		h.Stats = h.Stats[:len(h.Stats)-1]
-	}
-
-	return nil
+	return errors.Wrap(err, "HitStats.ListRefsByPathID")
 }

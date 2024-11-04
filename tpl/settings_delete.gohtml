@@ -1,0 +1,43 @@
+{{template "_backend_top.gohtml" .}}
+{{template "_settings_nav.gohtml" .}}
+
+<h2 id="delete">{{.T "header/delete-account|Delete account"}}</h2>
+<br>
+<div class="flash flash-e">
+<p><strong>{{.T `p/delete-account|
+	The site and all associated data will be permanently removed with no possibility of recovery.
+`}}</strong></p>
+</div>
+
+{{if gt (len .Sites) 1}}
+	<div class="flash flash-e" style="text-align: left;">
+	<p><strong>{{.T "p/notify-site-deletion|%(number) sites will be deleted" (len .Sites)}}</strong>:</p>
+	<ul>{{range $s := .Sites}}
+		<li>{{$s.Display $.Context}}</li>
+	{{end}}</ul>
+</div>
+{{end}}
+
+<form method="post" action="{{.Base}}/settings/delete-account" class="form-max-width"
+	data-confirm={{.T "label/delete-account-confirmation|Are you sure you want to delete your entire account?"}}>
+	<input type="hidden" name="csrf" value="{{.User.CSRFToken}}">
+
+	<label for="reason">{{.T `label/delete-account-reason|
+		It would be appreciated if you could let me know if there's anything in
+		particular you're missing in GoatCounter, or any other reasons you have
+		for wanting to delete your account. This is entirely optional.
+	`}}</label><br>
+	<textarea id="reason" name="reason" placeholder="{{.T "label/delete-account-reason-placeholder|Optional reason for deletion"}}">{{index .Delete "Reason"}}</textarea><br><br>
+
+	<label>{{checkbox (index .Delete "ContactMe") "contact_me"}} {{.T "label/delete-account-follow-up|It’s okay to follow up"}}</label><br>
+	<div style="max-width: 40em; color: #333;">{{.T `label/delete-account-contact|
+		I might contact you with some follow-up questions or commentary if you
+		check this. I won’t try to convince you to stay (I’m not a telecom), but
+		I might ask a question or two, or outline future plans if you’re missing
+		a particular feature.
+	`}}</div><br>
+
+	<button type="submit">{{.T "button/delete-account|Delete account, all sites, and all data"}}</button>
+</form>
+
+{{template "_backend_bottom.gohtml" .}}

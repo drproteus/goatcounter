@@ -1,6 +1,6 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 package cron_test
 
@@ -9,18 +9,17 @@ import (
 	"testing"
 	"time"
 
-	"zgo.at/goatcounter"
-	. "zgo.at/goatcounter/cron"
-	"zgo.at/goatcounter/gctest"
-	"zgo.at/zdb"
+	"zgo.at/goatcounter/v2"
+	"zgo.at/goatcounter/v2/cron"
+	"zgo.at/goatcounter/v2/gctest"
+	"zgo.at/zstd/zbool"
+	"zgo.at/zstd/ztime"
 )
 
 func TestDataRetention(t *testing.T) {
-	ctx, clean := gctest.DB(t)
-	defer clean()
+	ctx := gctest.DB(t)
 
-	site := goatcounter.Site{Code: "bbbb", Plan: goatcounter.PlanPersonal,
-		Settings: goatcounter.SiteSettings{DataRetention: 30}}
+	site := goatcounter.Site{Code: "bbbb", Settings: goatcounter.SiteSettings{DataRetention: 31}}
 	err := site.Insert(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -30,35 +29,38 @@ func TestDataRetention(t *testing.T) {
 	now := time.Now().UTC()
 	past := now.Add(-40 * 24 * time.Hour)
 
-	gctest.StoreHits(ctx, t, []goatcounter.Hit{
-		{Site: site.ID, CreatedAt: now, Path: "/a", FirstVisit: zdb.Bool(true)},
-		{Site: site.ID, CreatedAt: now, Path: "/a", FirstVisit: zdb.Bool(false)},
-		{Site: site.ID, CreatedAt: past, Path: "/a", FirstVisit: zdb.Bool(true)},
-		{Site: site.ID, CreatedAt: past, Path: "/a", FirstVisit: zdb.Bool(false)},
+	gctest.StoreHits(ctx, t, false, []goatcounter.Hit{
+		{Site: site.ID, CreatedAt: now, Path: "/a", FirstVisit: zbool.Bool(true)},
+		{Site: site.ID, CreatedAt: now, Path: "/a", FirstVisit: zbool.Bool(false)},
+		{Site: site.ID, CreatedAt: past, Path: "/a", FirstVisit: zbool.Bool(true)},
+		{Site: site.ID, CreatedAt: past, Path: "/a", FirstVisit: zbool.Bool(false)},
 	}...)
 
-	err = DataRetention(ctx)
+	err = cron.TaskDataRetention()
 	if err != nil {
 		t.Fatal(err)
 	}
+	cron.WaitDataRetention()
 
 	var hits goatcounter.Hits
-	_, err = hits.List(ctx, 0, 0)
+	err = hits.TestList(ctx, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hits) != 2 {
+	if len(hits) != 0 {
 		t.Errorf("len(hits) is %d\n%v", len(hits), hits)
 	}
 
-	var stats goatcounter.HitStats
-	display, displayUnique, more, err := stats.List(ctx, past.Add(-1*24*time.Hour), now, "", nil, false)
+	var stats goatcounter.HitLists
+	display, more, err := stats.List(ctx,
+		ztime.NewRange(past.Add(-1*24*time.Hour)).To(now),
+		nil, nil, 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	out := fmt.Sprintf("%d %d %t %v", display, displayUnique, more, err)
-	want := `2 1 false <nil>`
+	out := fmt.Sprintf("%d %t %v", display, more, err)
+	want := `1 false <nil>`
 	if out != want {
 		t.Errorf("\ngot:  %s\nwant: %s", out, want)
 	}

@@ -1,0 +1,78 @@
+{{template "_backend_top.gohtml" .}}
+{{template "_user_nav.gohtml" .}}
+
+<h2 id="auth">{{.T "header/api|API"}}</h2>
+{{if not .User.EmailVerified}}
+	<p>You need to verify your email before you can use the API; a link was sent to {{.User.Email}}.</p>
+
+	Change the email address in the <a href="{{.Base}}/user/pref">{{.T "link/settings|settings"}}</a> –
+	<form method="post" action="{{.Base}}/user/resend-verify">
+		<input type="hidden" name="csrf" value="{{.User.CSRFToken}}">
+		<button class="link">{{.T "button/resend-email|Resend email"}}</button>.
+	</form>
+</div>
+{{else}}
+	<p>{{.T "p/api-intro|GoatCounter comes with an API to count pageviews, read statistics, create exports, and manage sites and users."}}</p>
+	<p><a href="{{.Base}}/api">{{.T "link/api-docs|API documentation"}}</a></p>
+
+	<fieldset>
+		<legend>{{.T "header/api-tokens|API tokens"}}</legend>
+
+		<table class="auto">
+			<thead><tr>
+				<th>{{.T "header/name|Name"}}</th>
+				<th>{{.T "header/permissions|Permissions"}}</th>
+				<th>{{.T "header/token|Token"}}</th>
+				<th>{{.T "header/created-at|Created at"}}</th>
+				<th>{{.T "header/last-used-at|Last used"}}</th>
+				<th></th>
+			</tr></thead>
+
+			<tbody>
+				{{range $t := .APITokens}}<tr>
+					<td>{{$t.Name}}</td>
+					<td>
+						{{range $pf := $.Empty.PermissionFlags $t.Permissions}}
+						{{$pf.Label}}<br>
+						{{end}}
+					</td>
+					<td>{{$t.Token}}</td>
+					<td>{{$t.CreatedAt.UTC.Format "2006-01-02 (UTC)"}}</td>
+					<td>{{if $t.LastUsedAt}}
+						{{$t.LastUsedAt.UTC.Format "2006-01-02 (UTC)"}}
+					{{else}}
+						-
+					{{end}}</td>
+
+					<td>
+						<form method="post" action="{{$.Base}}/user/api-token/remove/{{$t.ID}}" data-confirm="Delete token {{$t.Name}}?">
+							<input type="hidden" name="csrf" value="{{$.User.CSRFToken}}">
+							<button class="link">{{$.T "button/delete|delete"}}</button>
+						</form>
+					</td>
+				</tr>{{end}}
+
+				<tr>
+					<form method="post" action="{{.Base}}/user/api-token">
+						<input type="hidden" name="csrf" value="{{$.User.CSRFToken}}">
+
+						<td>
+							<input type="text" id="name" name="name" placeholder="Name">
+						</td>
+						<td>
+							<input type="hidden" name="permissions[]" value="1">
+							{{range $pf := .Empty.PermissionFlags}}
+								<label {{if $pf.Help}}title="{{$pf.Help}}"{{end}}>
+									<input type="checkbox" name="permissions[]" value="{{$pf.Flag}}">
+									{{$pf.Label}}</label><br>
+							{{end}}
+						</td>
+						<td><button type="submit">{{$.T "button/add-new|Add new"}}</button></td>
+					</form>
+				</tr>
+			</tbody>
+		</table>
+	</fieldset>
+{{end}}
+
+{{template "_backend_bottom.gohtml" .}}

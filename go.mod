@@ -1,38 +1,66 @@
-module zgo.at/goatcounter
+module zgo.at/goatcounter/v2
 
-go 1.13
+go 1.23.0
 
 require (
-	code.soquee.net/otp v0.0.1
-	github.com/PuerkitoBio/goquery v1.5.1
-	github.com/arp242/geoip2-golang v1.4.0
-	github.com/boombuler/barcode v1.0.0
-	github.com/go-chi/chi v4.1.2+incompatible
-	github.com/jmoiron/sqlx v1.2.0
-	github.com/lib/pq v1.7.0
-	github.com/mattn/go-sqlite3 v1.14.0
-	github.com/monoculum/formam v0.0.0-20200527175922-6f3cce7a46cf
-	github.com/teamwork/reload v1.3.2
-	github.com/zgoat/kommentaar v0.1.2-0.20200627052335-2b2d4a9fb559
-	golang.org/x/crypto v0.0.0-20200510223506-06a226fb4e37
-	golang.org/x/net v0.0.0-20200324143707-d3edc9973b7e
-	golang.org/x/sync v0.0.0-20200317015054-43a5402ce75a
-	golang.org/x/tools v0.0.0-20200519205726-57a9e4404bf7
-	honnef.co/go/tools v0.0.1-2020.1.4
-	zgo.at/blackmail v0.0.0-20200703094839-f1e44ef1dbb8
-	zgo.at/errors v0.0.0-20200630143612-2b870b08fb1d
-	zgo.at/gadget v0.0.0-20200522205438-64412137d778
-	zgo.at/guru v1.1.0
-	zgo.at/isbot v0.0.0-20200627092736-4e2d25be1249
-	zgo.at/json v0.0.0-20200627042140-d5025253667f
-	zgo.at/tz v0.0.0-20200520034804-aeba38d94d93
-	zgo.at/zdb v0.0.0-20200704013256-53f5f3182386
-	zgo.at/zhttp v0.0.0-20200713005744-beb9ac646890
-	zgo.at/zli v0.0.0-20200711054229-0ce80f3f667a
-	zgo.at/zlog v0.0.0-20200519105857-4dc5e4ffe04c
-	zgo.at/zpack v1.0.1
-	zgo.at/zstd v0.0.0-20200623061931-3d4ffff7925b
-	zgo.at/zstripe v1.0.0
-	zgo.at/ztest v0.0.0-20200630024640-d19d80ca68af
-	zgo.at/zvalidate v0.0.0-20200611174908-64a702efab5a
+	code.soquee.net/otp v0.0.4
+	github.com/BurntSushi/toml v1.4.0
+	github.com/PuerkitoBio/goquery v1.9.2
+	github.com/bmatcuk/doublestar/v4 v4.6.1
+	github.com/boombuler/barcode v1.0.2
+	github.com/go-chi/chi/v5 v5.1.0
+	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.3
+	github.com/mattn/go-sqlite3 v1.14.22
+	github.com/monoculum/formam/v3 v3.6.1-0.20221106124510-6a93f49ac1f8
+	github.com/oschwald/geoip2-golang v1.4.0
+	github.com/russross/blackfriday/v2 v2.1.0
+	github.com/teamwork/reload v1.4.2
+	golang.org/x/crypto v0.26.0
+	golang.org/x/image v0.19.0
+	golang.org/x/net v0.28.0
+	golang.org/x/sync v0.8.0
+	golang.org/x/text v0.17.0
+	zgo.at/bgrun v0.0.0-00010101000000-000000000000
+	zgo.at/blackmail v0.0.0-20221021025740-b3fdfc32a1aa
+	zgo.at/errors v1.3.0
+	zgo.at/follow v0.0.0-20240522232612-673fb184d32f
+	zgo.at/gadget v1.0.0
+	zgo.at/guru v1.2.0
+	zgo.at/isbot v1.0.0
+	zgo.at/json v0.0.0-20221020004326-fe4f75bb278e
+	zgo.at/termtext v1.5.0
+	zgo.at/tz v0.0.0-20240819050900-3c7bf6122612
+	zgo.at/z18n v0.0.0-20240522230155-4d5af439f8c4
+	zgo.at/zcache v1.2.0
+	zgo.at/zcache/v2 v2.1.0
+	zgo.at/zdb v0.0.0-20240820041039-abefdffc704f
+	zgo.at/zhttp v0.0.0-20240819012318-b761c83c740e
+	zgo.at/zli v0.0.0-20240614180544-47534b1ce136
+	zgo.at/zlog v0.0.0-20211017235224-dd4772ddf860
+	zgo.at/zprof v0.0.0-20211217104121-c3c12596d8f0
+	zgo.at/zstd v0.0.0-20240801180155-977f077a1a7f
+	zgo.at/ztpl v0.0.0-20240522225602-574aca1079e7
+	zgo.at/zvalidate v0.0.0-20221021025449-cb54fa8efade
+)
+
+// Need to finish this and put it in its own repo.
+replace zgo.at/bgrun => ./bgrun
+
+// https://github.com/oschwald/maxminddb-golang/pull/75
+replace github.com/oschwald/maxminddb-golang => github.com/arp242/maxminddb-golang v1.8.1-0.20221021031716-eb1bbbb3fc5d
+
+// https://github.com/oschwald/geoip2-golang/pull/68
+replace github.com/oschwald/geoip2-golang => github.com/arp242/geoip2-golang v1.4.1-0.20220825052315-37df63691c60
+
+require (
+	github.com/andybalholm/cascadia v1.3.2 // indirect
+	github.com/fsnotify/fsnotify v1.7.0 // indirect
+	github.com/lib/pq v1.10.9 // indirect
+	github.com/oschwald/maxminddb-golang v1.10.0 // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
+	golang.org/x/mod v0.17.0 // indirect
+	golang.org/x/sys v0.23.0 // indirect
+	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
+	zgo.at/runewidth v0.1.0 // indirect
 )

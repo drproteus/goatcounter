@@ -2,13 +2,11 @@
 
 <h1>Sign up for GoatCounter</h1>
 
-<p>The first 14 days are always free, after that <a href="/terms#commercial">commercial</a> users must purchase a plan.</p>
-
 <p>You can use an account on any number of sites/domains; see <em>Settings</em>
-→ <em>Additional sites</em> for separating them out.</p>
+→ <em>sites</em> for separating them out.</p>
 
 <div id="signup-form">
-	<form class="vertical" method="post" action="/signup">
+	<form class="vertical" method="post" action="{{.Base}}/signup">
 		<fieldset class="two">
 			<div>
 				<div>
@@ -21,7 +19,7 @@
 					<label for="link_domain">Site domain</label>
 					<input type="text" name="link_domain" id="link_domain" maxlength="255" value="{{.Site.LinkDomain}}">
 					{{validate "site.link_domain" .Validate}}
-					<span class="help">Your site’s domain, used for display/linlking; optional.</em></span>
+					<span class="help">Your site’s domain, used for display/linking; optional.</em></span>
 				</div>
 
 			</div>
@@ -62,7 +60,7 @@
 	{{if has_errors .Validate}}
 		<div class="flash flash-e"
 				style="position: fixed; bottom: 0; right: 0; min-width: 20em; z-index: 5; text-align: left;">
-		Additional errors:{{.Validate.HTML}}</div>
+		{{.T "p/additional-errors|Additional errors"}}:{{.Validate.HTML}}</div>
 	{{end}}
 </div>
 

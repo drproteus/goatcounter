@@ -1,6 +1,6 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 package goatcounter_test
 
@@ -10,16 +10,34 @@ import (
 	"reflect"
 	"testing"
 
-	. "zgo.at/goatcounter"
-	"zgo.at/goatcounter/gctest"
+	. "zgo.at/goatcounter/v2"
+	"zgo.at/goatcounter/v2/gctest"
 	"zgo.at/zvalidate"
 )
 
-func TestSiteInsert(t *testing.T) {
-	ctx, clean := gctest.DB(t)
-	defer clean()
+func TestGetAccount(t *testing.T) {
+	ctx := gctest.DB(t)
 
-	s := Site{Code: "the-code", Plan: PlanPersonal}
+	a := MustGetAccount(ctx)
+	if a.ID != MustGetSite(ctx).ID {
+		t.Fatal()
+	}
+
+	ctx2 := gctest.Site(ctx, t, &Site{Parent: &MustGetSite(ctx).ID}, nil)
+	a2 := MustGetAccount(ctx2)
+	if a2.ID != MustGetSite(ctx).ID {
+		t.Fatal()
+	}
+
+	if MustGetSite(ctx).ID != 1 || MustGetSite(ctx2).ID != 2 {
+		t.Fatal() // Make sure original isn't modified.
+	}
+}
+
+func TestSiteInsert(t *testing.T) {
+	ctx := gctest.DB(t)
+
+	s := Site{Code: "the-code"}
 	err := s.Insert(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -37,24 +55,24 @@ func TestSiteValidate(t *testing.T) {
 		want  map[string][]string
 	}{
 		{
-			Site{Code: "hello-0", State: StateActive, Plan: PlanPersonal},
+			Site{Code: "hello-0", State: StateActive},
 			nil,
 			nil,
 		},
 		{
-			Site{Code: "h€llo", State: StateActive, Plan: PlanPersonal},
+			Site{Code: "h€llo", State: StateActive},
 			nil,
 			map[string][]string{"code": {"must be a valid hostname: invalid character: '€'"}},
 		},
 		{
-			Site{Code: "hel_lo", State: StateActive, Plan: PlanPersonal},
+			Site{Code: "hel_lo", State: StateActive},
 			nil,
 			map[string][]string{"code": {"must be a valid hostname: invalid character: '_'"}},
 		},
 		{
-			Site{Code: "hello", State: StateActive, Plan: PlanPersonal},
+			Site{Code: "hello", State: StateActive},
 			func(ctx context.Context) {
-				s := Site{Code: "hello", State: StateActive, Plan: PlanPersonal}
+				s := Site{Code: "hello", State: StateActive}
 				err := s.Insert(ctx)
 				if err != nil {
 					panic(err)
@@ -66,8 +84,7 @@ func TestSiteValidate(t *testing.T) {
 
 	for i, tt := range tests {
 		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
-			ctx, clean := gctest.DB(t)
-			defer clean()
+			ctx := gctest.DB(t)
 
 			if tt.prefn != nil {
 				tt.prefn(ctx)

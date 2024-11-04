@@ -1,54 +1,90 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 package goatcounter
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"zgo.at/errors"
 	"zgo.at/zdb"
-	"zgo.at/zlog"
-	"zgo.at/zvalidate"
+	"zgo.at/zstd/zbool"
+	"zgo.at/zstd/zint"
+	"zgo.at/zstd/ztime"
 )
 
-func ptr(s string) *string { return &s }
-
 type Hit struct {
-	ID      int64  `db:"id" json:"-"`
-	Site    int64  `db:"site" json:"-"`
-	Session *int64 `db:"session" json:"-"`
+	ID         int64        `db:"hit_id" json:"-"`
+	Site       int64        `db:"site_id" json:"-"`
+	PathID     int64        `db:"path_id" json:"-"`
+	RefID      int64        `db:"ref_id" json:"-"`
+	SizeID     *int64       `db:"size_id" json:"-"`
+	BrowserID  int64        `db:"browser_id" json:"-"`
+	SystemID   int64        `db:"system_id" json:"-"`
+	CampaignID *int64       `db:"campaign" json:"-"`
+	Session    zint.Uint128 `db:"session" json:"-"`
 
-	Path  string     `db:"path" json:"p,omitempty"`
-	Title string     `db:"title" json:"t,omitempty"`
-	Ref   string     `db:"ref" json:"r,omitempty"`
-	Event zdb.Bool   `db:"event" json:"e,omitempty"`
-	Size  zdb.Floats `db:"size" json:"s,omitempty"`
+	Path  string     `db:"-" json:"p,omitempty"`
+	Title string     `db:"-" json:"t,omitempty"`
+	Ref   string     `db:"-" json:"r,omitempty"`
+	Event zbool.Bool `db:"-" json:"e,omitempty"`
+	Size  Floats     `db:"-" json:"s,omitempty"`
 	Query string     `db:"-" json:"q,omitempty"`
 	Bot   int        `db:"bot" json:"b,omitempty"`
 
-	RefScheme  *string   `db:"ref_scheme" json:"-"`
-	Browser    string    `db:"browser" json:"-"`
-	Location   string    `db:"location" json:"-"`
-	FirstVisit zdb.Bool  `db:"first_visit" json:"-"`
-	CreatedAt  time.Time `db:"created_at" json:"-"`
+	RefScheme       *string    `db:"ref_scheme" json:"-"`
+	UserAgentHeader string     `db:"-" json:"-"`
+	Location        string     `db:"location" json:"-"`
+	Language        *string    `db:"language" json:"-"`
+	FirstVisit      zbool.Bool `db:"first_visit" json:"-"`
+	CreatedAt       time.Time  `db:"created_at" json:"-"`
 
 	RefURL *url.URL `db:"-" json:"-"`   // Parsed Ref
 	Random string   `db:"-" json:"rnd"` // Browser cache buster, as they don't always listen to Cache-Control
+
+	// Some values we need to pass from the HTTP handler to memstore
+	RemoteAddr    string `db:"-" json:"-"`
+	UserSessionID string `db:"-" json:"-"`
+
+	NoStore   bool `db:"-" json:"-"` // Don't store in hits (still store in stats).
+	noProcess bool `db:"-" json:"-"` // Don't process in memstore; for merging paths.
+}
+
+func (h *Hit) Ignore() bool {
+	// kproxy.com; not easy to get the original path, so just ignore it.
+	if strings.HasPrefix(h.Path, "/servlet/redirect.srv/") {
+		return true
+	}
+	// Almost certainly some broken HTML or whatnot.
+	if strings.Contains(h.Path, "<html>") || strings.Contains(h.Path, "<HTML>") {
+		return true
+	}
+	// Don't record favicon from logfiles.
+	if h.Path == "/favicon.ico" {
+		return true
+	}
+
+	return false
 }
 
 func (h *Hit) cleanPath(ctx context.Context) {
+	h.Path = strings.TrimSpace(h.Path)
 	if h.Event {
 		h.Path = strings.TrimLeft(h.Path, "/")
 		return
 	}
+
+	if h.Path == "" { // Don't fill empty path to "/"
+		return
+	}
+
+	h.Path = "/" + strings.Trim(h.Path, "/")
 
 	// Normalize the path when accessed from e.g. offline storage or internet
 	// archive.
@@ -68,6 +104,9 @@ func (h *Hit) cleanPath(ctx context.Context) {
 			u, err := url.Parse(h.Path[20:])
 			if err == nil {
 				h.Path = u.Path
+				if h.Path == "" {
+					h.Path = "/"
+				}
 				if q := u.Query().Encode(); q != "" {
 					h.Path += "?" + q
 				}
@@ -97,6 +136,7 @@ func (h *Hit) cleanPath(ctx context.Context) {
 				q.Del(k)
 			}
 		}
+		q.Del("gclid") // AdWords click ID
 
 		// Some WeChat tracking thing; see e.g:
 		// https://translate.google.com/translate?sl=auto&tl=en&u=https%3A%2F%2Fsheshui.me%2Fblogs%2Fexplain-wechat-nsukey-url
@@ -107,49 +147,47 @@ func (h *Hit) cleanPath(ctx context.Context) {
 			q.Del("from")
 		}
 
-		u.RawQuery = q.Encode()
-		h.Path = u.String()
-	}
-}
+		// Cloudflare
+		q.Del("__cf_chl_captcha_tk__")
+		q.Del("__cf_chl_jschl_tk__")
 
-func (h Hit) String() string {
-	b := new(bytes.Buffer)
-	t := tabwriter.NewWriter(b, 8, 8, 2, ' ', 0)
-	fmt.Fprintf(t, "ID\t%d\n", h.ID)
-	fmt.Fprintf(t, "Site\t%d\n", h.Site)
-	if h.Session == nil {
-		fmt.Fprintf(t, "Session\t<nil>\n")
-	} else {
-		fmt.Fprintf(t, "Session\t%d\n", *h.Session)
+		// Added by Weibo.cn (a sort of Chinese Twitter), with a random ID:
+		//   /?continueFlag=4020a77be9019cf14fefc373267aa46e
+		//   /?continueFlag=c397418f4346f293408b311b1bc819d4
+		// Presumably a tracking thing?
+		q.Del("continueFlag")
+
+		q.Del("_x_tr_sl") // Google translate
+		q.Del("_x_tr_hl")
+		q.Del("_x_tr_pto")
+		if q.Has("_x_tr_tl") { // Rename the destination language.
+			q.Set("translate-to", q.Get("_x_tr_tl"))
+			q.Del("_x_tr_tl")
+		}
+
+		u.RawQuery = q.Encode()
+		h.Path = "/" + strings.Trim(u.String(), "/")
 	}
-	fmt.Fprintf(t, "Path\t%q\n", h.Path)
-	fmt.Fprintf(t, "Title\t%q\n", h.Title)
-	fmt.Fprintf(t, "Ref\t%q\n", h.Ref)
-	fmt.Fprintf(t, "Event\t%t\n", h.Event)
-	if h.RefScheme == nil {
-		fmt.Fprintf(t, "RefScheme\t<nil>\n")
-	} else {
-		fmt.Fprintf(t, "RefScheme\t%q\n", *h.RefScheme)
-	}
-	fmt.Fprintf(t, "Browser\t%q\n", h.Browser)
-	fmt.Fprintf(t, "Size\t%q\n", h.Size)
-	fmt.Fprintf(t, "Location\t%q\n", h.Location)
-	fmt.Fprintf(t, "Bot\t%d\n", h.Bot)
-	fmt.Fprintf(t, "CreatedAt\t%s\n", h.CreatedAt)
-	t.Flush()
-	return b.String()
 }
 
 // Defaults sets fields to default values, unless they're already set.
-func (h *Hit) Defaults(ctx context.Context) {
+func (h *Hit) Defaults(ctx context.Context, initial bool) error {
 	site := MustGetSite(ctx)
 	h.Site = site.ID
 
 	if h.CreatedAt.IsZero() {
-		h.CreatedAt = Now()
+		h.CreatedAt = ztime.Now()
 	}
 
-	h.cleanPath(ctx)
+	if h.Event {
+		h.Path = strings.TrimLeft(h.Path, "/")
+		// In case people send "/" as the event path.
+		if h.Path == "" {
+			h.Path = "(no event name)"
+		}
+	} else {
+		h.cleanPath(ctx)
+	}
 
 	// Set campaign.
 	if !h.Event && h.Query != "" {
@@ -158,21 +196,48 @@ func (h *Hit) Defaults(ctx context.Context) {
 		}
 		u, err := url.Parse(h.Query)
 		if err != nil {
-			return
+			return errors.Wrap(err, "Hit.Defaults")
 		}
 		q := u.Query()
 
-		for _, c := range site.Settings.Campaigns {
-			if _, ok := q[c]; ok {
-				h.Ref = q.Get(c)
-				h.RefURL = nil
-				h.RefScheme = RefSchemeCampaign
-				break
+		// Get referral from query
+		for _, c := range []string{"utm_source", "ref", "src", "source"} {
+			v := strings.TrimSpace(q.Get(c))
+			if v == "" {
+				continue
 			}
+
+			h.Ref = v
+			h.RefURL = nil
+			h.RefScheme = RefSchemeCampaign
+			break
+		}
+
+		// Get campaign.
+		for _, c := range []string{"utm_campaign", "campaign"} {
+			v := strings.TrimSpace(q.Get(c))
+			if v == "" {
+				continue
+			}
+
+			c := Campaign{Name: v}
+			err := c.ByName(ctx, c.Name)
+			if err != nil && !zdb.ErrNoRows(err) {
+				return errors.Wrap(err, "Hit.Defaults")
+			}
+
+			if zdb.ErrNoRows(err) {
+				err := c.Insert(ctx)
+				if err != nil {
+					return errors.Wrap(err, "Hit.Defaults")
+				}
+			}
+			h.CampaignID = &c.ID
+			h.RefScheme = RefSchemeCampaign
 		}
 	}
 
-	if h.Ref != "" && h.RefURL != nil {
+	if h.RefScheme == nil && h.Ref != "" && h.RefURL != nil {
 		if h.RefURL.Scheme == "http" || h.RefURL.Scheme == "https" {
 			h.RefScheme = RefSchemeHTTP
 		} else {
@@ -186,169 +251,192 @@ func (h *Hit) Defaults(ctx context.Context) {
 		}
 	}
 	h.Ref = strings.TrimRight(h.Ref, "/")
-	if !h.Event {
-		h.Path = "/" + strings.Trim(h.Path, "/")
+
+	if initial {
+		return nil
 	}
+
+	// Get or insert path.
+	path := Path{Path: h.Path, Title: h.Title, Event: h.Event}
+	err := path.GetOrInsert(ctx)
+	if err != nil {
+		return errors.Wrap(err, "Hit.Defaults")
+	}
+	h.PathID = path.ID
+
+	// Get or insert ref.
+	ref := Ref{Ref: h.Ref, RefScheme: h.RefScheme}
+	err = ref.GetOrInsert(ctx)
+	if err != nil {
+		return errors.Wrap(err, "Hit.Defaults")
+	}
+	h.RefID = ref.ID
+
+	// Get or insert size.
+	if site.Settings.Collect.Has(CollectScreenSize) {
+		var size Size
+		err = size.GetOrInsert(ctx, h.Size)
+		if err != nil {
+			return errors.Wrap(err, "Hit.Defaults")
+		}
+		h.SizeID = &size.ID
+	}
+
+	// Get or insert browser and system.
+	if site.Settings.Collect.Has(CollectUserAgent) {
+		ua := UserAgent{UserAgent: h.UserAgentHeader}
+		err = ua.GetOrInsert(ctx)
+		if err != nil {
+			return errors.Wrap(err, "Hit.Defaults")
+		}
+		h.BrowserID = ua.BrowserID
+		h.SystemID = ua.SystemID
+	}
+
+	return nil
 }
 
 // Validate the object.
-func (h *Hit) Validate(ctx context.Context) error {
-	v := zvalidate.New()
+func (h *Hit) Validate(ctx context.Context, initial bool) error {
+	v := NewValidate(ctx)
 
 	v.Required("site", h.Site)
-	v.Required("session", h.Session)
-	v.Required("path", h.Path)
-	v.UTF8("path", h.Path)
-	v.UTF8("title", h.Title)
+	//v.Required("session", h.Session)
+	v.Required("created_at", h.CreatedAt)
 	v.UTF8("ref", h.Ref)
-	v.UTF8("browser", h.Browser)
-
-	v.Len("path", h.Path, 1, 2048)
-	v.Len("title", h.Title, 0, 1024)
 	v.Len("ref", h.Ref, 0, 2048)
-	v.Len("browser", h.Browser, 0, 512)
+
+	// Small margin as client's clocks may not be 100% accurate.
+	if h.CreatedAt.After(ztime.Now().Add(5 * time.Second)) {
+		v.Append("created_at", "in the future")
+	}
+
+	if initial {
+		v.Required("path", h.Path)
+		v.UTF8("path", h.Path)
+		v.UTF8("title", h.Title)
+		v.UTF8("user_agent_header", h.UserAgentHeader)
+		v.Len("path", h.Path, 1, 2048)
+		v.Len("title", h.Title, 0, 1024)
+		v.Len("user_agent_header", h.UserAgentHeader, 0, 512)
+	} else {
+		v.Required("path_id", h.PathID)
+
+		if MustGetSite(ctx).Settings.Collect.Has(CollectUserAgent) {
+			v.Required("browser_id", h.BrowserID)
+			v.Required("system_id", h.SystemID)
+		}
+	}
 
 	return v.ErrorOrNil()
 }
 
 type Hits []Hit
 
-// List all hits for a site, including bot requests.
-func (h *Hits) List(ctx context.Context, limit, paginate int64) (int64, error) {
-	if limit == 0 || limit > 5000 {
-		limit = 5000
+// TestList lists all hits, for all sites, with browser_id, system_id, and paths
+// set.
+//
+// This is intended for tests.
+func (h *Hits) TestList(ctx context.Context, siteOnly bool) error {
+	var hh []struct {
+		Hit
+		B    int64      `db:"browser_id"`
+		S    int64      `db:"system_id"`
+		P    string     `db:"path"`
+		T    string     `db:"title"`
+		E    zbool.Bool `db:"event"`
+		R    string     `db:"ref"`
+		Size Floats     `db:"size"`
 	}
 
-	err := zdb.MustGet(ctx).SelectContext(ctx, h,
-		`select * from hits where site=$1 and id>$2 order by id asc limit $3`,
-		MustGetSite(ctx).ID, paginate, limit)
-
-	last := paginate
-	if len(*h) > 0 {
-		hh := *h
-		last = hh[len(hh)-1].ID
+	err := zdb.Select(ctx, &hh, `/* Hits.TestList */
+		select
+			hits.*,
+			browser_id,
+			system_id,
+			paths.path,
+			paths.title,
+			paths.event,
+			refs.ref,
+			sizes.size
+		from hits
+		join paths using (path_id)
+		left join refs  using (ref_id)
+		left join sizes using (size_id)
+		{{:site_only where hits.site_id = :site}}
+		order by hit_id asc`,
+		map[string]any{
+			"site":      MustGetSite(ctx).ID,
+			"site_only": siteOnly,
+		})
+	if err != nil {
+		return errors.Wrap(err, "Hits.TestList")
 	}
 
-	return last, errors.Wrap(err, "Hits.List")
+	for _, x := range hh {
+		x.Hit.BrowserID = x.B
+		x.Hit.SystemID = x.S
+		x.Hit.Path = x.P
+		x.Hit.Title = x.T
+		x.Hit.Event = x.E
+		x.Hit.Ref = x.R
+		x.Hit.Size = x.Size
+
+		*h = append(*h, x.Hit)
+	}
+	return nil
 }
 
-// Count the number of pageviews.
-func (h *Hits) Count(ctx context.Context) (int64, error) {
-	var c int64
-	err := zdb.MustGet(ctx).GetContext(ctx, &c,
-		`select coalesce(sum(total), 0) from hit_counts where site=$1`,
-		MustGetSite(ctx).ID)
-	return c, errors.Wrap(err, "Hits.Count")
-}
-
-// Purge all paths matching the like pattern.
-func (h *Hits) Purge(ctx context.Context, path string, matchTitle bool) error {
+// Purge the given paths.
+func (h *Hits) Purge(ctx context.Context, pathIDs []int64) error {
 	query := `/* Hits.Purge */
-		delete from %s where site=$1 and lower(path) like lower($2)`
-	if matchTitle {
-		query += ` and lower(title) like lower($2) `
-	}
+		delete from %s where site_id=? and path_id in (?)`
 
-	return zdb.TX(ctx, func(ctx context.Context, tx zdb.DB) error {
+	return zdb.TX(ctx, func(ctx context.Context) error {
 		site := MustGetSite(ctx).ID
 
-		for _, t := range []string{"hits", "hit_stats", "hit_counts"} {
-			_, err := tx.ExecContext(ctx, fmt.Sprintf(query, t), site, path)
+		for _, t := range append(statTables, "hit_counts", "ref_counts", "hits", "paths") {
+			err := zdb.Exec(ctx, fmt.Sprintf(query, t), site, pathIDs)
 			if err != nil {
 				return errors.Wrapf(err, "Hits.Purge %s", t)
 			}
 		}
-		_, err := tx.ExecContext(ctx, `/* Hits.Purge */
-			delete from ref_counts where site=$1 and lower(path) like lower($2)`,
-			site, path)
-		if err != nil {
-			return errors.Wrap(err, "Hits.Purge ref_counts")
-		}
 
-		// Delete all other stats as well if there's nothing left: not much use
-		// for it.
-		var check Hits
-		n, err := check.Count(ctx)
-		if err == nil && n == 0 {
-			for _, t := range statTables {
-				_, err := tx.ExecContext(ctx, `delete from `+t+` where site=$1`, site)
-				if err != nil {
-					zlog.Errorf("Hits.Purge: delete %s: %s", t, err)
-				}
-			}
-		}
-
+		MustGetSite(ctx).ClearCache(ctx, true)
 		return nil
 	})
 }
 
-type Stat struct {
-	Day          string
-	Hourly       []int
-	HourlyUnique []int
-	Daily        int
-	DailyUnique  int
-}
+// Merge the given paths.
+func (h *Hits) Merge(ctx context.Context, dst int64, pathIDs []int64) error {
+	// Shouldn't happen, but just in case.
+	pathIDs = slices.DeleteFunc(pathIDs, func(p int64) bool { return p == dst })
 
-type HitStat struct {
-	Count       int      `db:"count"`
-	CountUnique int      `db:"count_unique"`
-	Path        string   `db:"path"`
-	Event       zdb.Bool `db:"event"`
-	Title       string   `db:"title"`
-	RefScheme   *string  `db:"ref_scheme"`
-	Max         int
-	Stats       []Stat
-}
+	site := MustGetSite(ctx).ID
 
-type HitStats []HitStat
-
-// ListPathsLike lists all paths matching the like pattern.
-func (h *HitStats) ListPathsLike(ctx context.Context, path string, matchTitle bool) error {
-	t := ""
-	if matchTitle {
-		t = " or lower(title) like lower($2) "
+	err := (&Path{}).ByID(ctx, dst) // Ensure this site owns the path.
+	if err != nil {
+		return errors.Wrap(err, "Hits.Merge")
 	}
 
-	err := zdb.MustGet(ctx).SelectContext(ctx, h, `
-		select path, title, sum(total) as count from hit_counts
-		where site=$1 and (lower(path) like lower($2) `+t+`)
-		group by path, title
-		order by count desc
-	`, MustGetSite(ctx).ID, path)
-	return errors.Wrap(err, "Hits.ListPathsLike")
-}
+	// Push back to lot to memstore to re-add it again, and then just call
+	// Purge() to delete the old ones.
+	err = zdb.Select(ctx, h, `select * from hits where site_id=? and path_id in (?)`, site, pathIDs)
+	if err != nil {
+		return errors.Wrap(err, "Hits.Merge")
+	}
+	hh := *h
+	for i := range hh {
+		hh[i].PathID = dst
+		hh[i].noProcess = true
+	}
 
-type StatT struct {
-	// TODO: should be Stat, but that's already taken and don't want to rename
-	// everything right now.
-	Name        string  `db:"name"`
-	Count       int     `db:"count"`
-	CountUnique int     `db:"count_unique"`
-	RefScheme   *string `db:"ref_scheme"`
-}
+	err = errors.Wrap(h.Purge(ctx, pathIDs), "Hits.Merge")
+	if err != nil {
+		return errors.Wrap(err, "Hits.Merge")
+	}
 
-type Stats struct {
-	More  bool
-	Stats []StatT
-}
-
-// ByRef lists all paths by reference.
-func (h *Stats) ByRef(ctx context.Context, start, end time.Time, ref string) error {
-	err := zdb.MustGet(ctx).SelectContext(ctx, &h.Stats, `/* Stats.ByRef */
-		select
-			path as name,
-			coalesce(sum(total), 0) as count,
-			coalesce(sum(total_unique), 0) as count_unique
-		from ref_counts where
-			site=$1 and
-			hour>=$2 and
-			hour<=$3 and
-			ref = $4
-		group by path
-		order by count desc
-		limit 10`,
-		MustGetSite(ctx).ID, start.Format(zdb.Date), end.Format(zdb.Date), ref)
-
-	return errors.Wrap(err, "Stats.ByRef")
+	// Only push back if delete worked.
+	Memstore.Append(hh...)
+	return nil
 }

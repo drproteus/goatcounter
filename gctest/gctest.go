@@ -1,6 +1,6 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 // Package gctest contains testing helpers.
 package gctest
@@ -8,218 +8,174 @@ package gctest
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/jmoiron/sqlx"
-	"zgo.at/goatcounter"
-	"zgo.at/goatcounter/cfg"
-	"zgo.at/goatcounter/cron"
+	"golang.org/x/text/language"
+	"zgo.at/goatcounter/v2"
+	"zgo.at/goatcounter/v2/cron"
+	"zgo.at/goatcounter/v2/db/migrate/gomig"
+	"zgo.at/z18n"
 	"zgo.at/zdb"
-	"zgo.at/zhttp"
-	"zgo.at/zstd/zstring"
+	"zgo.at/zdb/drivers/go-sqlite3"
+	"zgo.at/zstd/zcrypto"
+	"zgo.at/zstd/zgo"
+	"zgo.at/zstd/ztype"
 )
 
-type tester interface {
-	Helper()
-	Fatal(...interface{})
-	Fatalf(string, ...interface{})
-	Logf(string, ...interface{})
+var pgSQL = false
+
+func init() {
+	sqlite3.DefaultHook(goatcounter.SQLiteHook)
+	goatcounter.InitGeoDB("")
 }
 
-var (
-	dbname = "goatcounter_test_" + zhttp.Secret64()
-	db     *sqlx.DB
-	tables []string
-)
+// Context creates a new test context.
+func Context(db zdb.DB) context.Context {
+	ctx := goatcounter.NewContext(db)
+	ctx = z18n.With(ctx, z18n.NewBundle(language.BritishEnglish).Locale("en-GB"))
+	goatcounter.Config(ctx).BcryptMinCost = true
+	goatcounter.Config(ctx).GoatcounterCom = true
+	goatcounter.Config(ctx).Domain = "test"
+	return ctx
+}
+
+// Reset global state.
+func Reset() {
+	goatcounter.Memstore.Reset()
+}
 
 // DB starts a new database test.
-func DB(t tester) (context.Context, func()) {
+func DB(t testing.TB) context.Context {
 	t.Helper()
-	ctx := context.Background()
+	return db(t, false)
+}
 
-	if db == nil {
-		var err error
-		if cfg.PgSQL {
-			{
-				out, err := exec.Command("createdb", dbname).CombinedOutput()
-				if err != nil {
-					t.Fatalf("%s → %s", err, out)
-				}
+// DBFile is like DB(), but guarantees that the database will be written to
+// disk, whereas DB() may store it in memory.
+//
+// You can get the connection string from the GCTEST_CONNECT environment
+// variable.
+func DBFile(t testing.TB) context.Context {
+	t.Helper()
+	return db(t, true)
+}
+
+// TODO: this should use zdb.StartTest(); need to be able to pass in some
+// zdb.ConnectOptions{} to that though.
+// TODO: we can create unlogged tables in PostgreSQL, which should be faster:
+//
+//	create unlogged table foo [..]
+func db(t testing.TB, storeFile bool) context.Context {
+	t.Helper()
+
+	dbname := "goatcounter_test_" + zcrypto.Secret64()
+
+	conn := "sqlite3+:memory:?cache=shared"
+	if storeFile {
+		conn = "sqlite+" + t.TempDir() + "/goatcounter.sqlite3"
+	}
+	if pgSQL {
+		os.Setenv("PGDATABASE", dbname)
+		conn = "postgresql+"
+	}
+	os.Setenv("GCTEST_CONNECT", conn)
+
+	db, err := zdb.Connect(context.Background(), zdb.ConnectOptions{
+		Connect:      conn,
+		Files:        os.DirFS(zgo.ModuleRoot()),
+		Migrate:      []string{"all"},
+		GoMigrations: gomig.Migrations,
+		Create:       true,
+	})
+	if err != nil {
+		t.Fatalf("connect to DB: %s", err)
+	}
+
+	ctx := Context(db)
+	goatcounter.Memstore.TestInit(db)
+	ctx = initData(ctx, db, t)
+	cron.Start(ctx)
+
+	t.Cleanup(func() {
+		goatcounter.Memstore.Reset()
+		cron.Stop()
+		db.Close()
+
+		_, keepdb := os.LookupEnv("KEEPDB")
+		switch db.SQLDialect() {
+		case zdb.DialectPostgreSQL:
+			db.Close()
+			if keepdb {
+				fmt.Println("KEPT DATABASE")
+				fmt.Println("    psql", dbname)
+			} else {
+				exec.Command("dropdb", dbname).Run()
 			}
-
-			db, err = sqlx.Connect("postgres", "dbname="+dbname+" sslmode=disable password=x")
-		} else {
-			db, err = sqlx.Connect("sqlite3", "file::memory:?cache=shared")
+		default:
+			if keepdb {
+				fmt.Println("KEEPDB not supported for this SQL dialect")
+			}
+			db.Close()
 		}
-		if err != nil {
-			t.Fatalf("connect to DB: %s", err)
-		}
-		ctx = zdb.With(ctx, db)
+	})
 
-		setupDB(t)
-
-		tables, err = zdb.ListTables(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		exclude := []string{"iso_3166_1", "version"}
-		tables = zstring.Filter(tables, func(t string) bool { return !zstring.Contains(exclude, t) })
-	} else {
-		ctx = zdb.With(ctx, db)
-
-		q := `delete from %s`
-		if cfg.PgSQL {
-			// TODO: takes about 450ms, which is rather long. See if we can
-			// speed this up.
-			q = `truncate %s restart identity cascade`
-		}
-		for _, t := range tables {
-			db.MustExec(fmt.Sprintf(q, t))
-		}
-		if !cfg.PgSQL {
-			db.MustExec(`delete from sqlite_sequence`)
-		}
-	}
-
-	ctx = initData(ctx, t)
-
-	return ctx, func() {
-		goatcounter.Salts.Clear()
-
-		// TODO: run after all tests are done.
-		// out, err := exec.Command("dropdb", dbname).CombinedOutput()
-		// if err != nil {
-		// 	t.Logf("dropdb: %s → %s", err, out)
-		// }
-	}
+	return ctx
 }
 
-func setupDB(t tester) {
-	top, err := os.Getwd()
+func initData(ctx context.Context, db zdb.DB, t testing.TB) context.Context {
+	site := goatcounter.Site{Code: "gctest", Cname: ztype.Ptr("gctest.localhost")}
+	err := site.Insert(ctx)
 	if err != nil {
-		t.Fatalf(fmt.Sprintf("cannot get cwd: %s", err))
+		t.Fatalf("create site: %s", err)
 	}
-	for {
-		if filepath.Base(top) == "goatcounter" {
-			break
-		}
-		top = filepath.Dir(top)
-		// Hit root path, I don't know how that will appear on Windows so check
-		// the len(). Should never happen anyway.
-		if len(top) < 5 {
-			break
-		}
-	}
-	schemapath := top + "/db/schema.sql"
-	migratepath := top + "/db/migrate/sqlite"
-	if cfg.PgSQL {
-		schemapath = top + "/db/schema.pgsql"
-		migratepath = top + "/db/migrate/pgsql"
-	}
+	ctx = goatcounter.WithSite(ctx, &site)
 
-	s, err := ioutil.ReadFile(schemapath)
+	user := goatcounter.User{
+		Site:          site.ID,
+		Access:        goatcounter.UserAccesses{"all": goatcounter.AccessAdmin},
+		Email:         "test@gctest.localhost",
+		EmailVerified: true,
+		Password:      []byte("coconuts"),
+	}
+	err = user.Insert(ctx, false)
 	if err != nil {
-		t.Fatalf("read schema: %v", err)
+		t.Fatalf("create user: %s", err)
 	}
-	schema := string(s)
-	_, err = db.ExecContext(context.Background(), schema)
-	if err != nil {
-		t.Fatalf("run schema %q: %v", schemapath, err)
-	}
-
-	migs, err := ioutil.ReadDir(migratepath)
-	if err != nil {
-		t.Fatalf("read migration directory: %s", err)
-	}
-
-	var migrations [][]string
-	for _, m := range migs {
-		if !strings.HasSuffix(m.Name(), ".sql") {
-			continue
-		}
-		var ran bool
-		db.Get(&ran, `select 1 from version where name=$1`, m.Name()[:len(m.Name())-4])
-		if ran {
-			continue
-		}
-
-		mp := fmt.Sprintf("%s/%s", migratepath, m.Name())
-		mb, err := ioutil.ReadFile(mp)
-		if err != nil {
-			t.Fatalf("read migration: %s", err)
-		}
-		migrations = append(migrations, []string{mp, string(mb)})
-	}
-
-	for _, m := range migrations {
-		_, err = db.ExecContext(context.Background(), m[1])
-		if err != nil {
-			t.Fatalf("run migration %q: %s", m[0], err)
-		}
-	}
-}
-
-func initData(ctx context.Context, t tester) context.Context {
-	{
-		_, err := db.ExecContext(ctx, `insert into sites
-			(code, plan, settings, created_at) values ('test', 'personal', '{}', $1)`,
-			goatcounter.Now().Format(zdb.Date))
-		if err != nil {
-			t.Fatalf("create site: %s", err)
-		}
-
-		var site goatcounter.Site
-		err = site.ByID(ctx, 1)
-		if err != nil {
-			t.Fatalf("get site: %s", err)
-		}
-		ctx = goatcounter.WithSite(ctx, &site)
-	}
-
-	{
-		_, err := db.ExecContext(ctx, `insert into users
-			(site, email, password, created_at) values (1, 'test@example.com', 'xx', $1)`,
-			goatcounter.Now().Format(zdb.Date))
-		if err != nil {
-			t.Fatalf("create site: %s", err)
-		}
-
-		var user goatcounter.User
-		err = user.BySite(ctx, 1)
-		if err != nil {
-			t.Fatalf("get user: %s", err)
-		}
-		ctx = goatcounter.WithUser(ctx, &user)
-	}
+	ctx = goatcounter.WithUser(ctx, &user)
 
 	return ctx
 }
 
 // StoreHits is a convenient helper to store hits in the DB via Memstore and
 // cron.UpdateStats().
-func StoreHits(ctx context.Context, t *testing.T, hits ...goatcounter.Hit) []goatcounter.Hit {
+func StoreHits(ctx context.Context, t *testing.T, wantFail bool, hits ...goatcounter.Hit) []goatcounter.Hit {
 	t.Helper()
 
-	one := int64(1)
+	siteID := int64(1)
+	if s := goatcounter.GetSite(ctx); s != nil {
+		siteID = s.ID
+	}
 	for i := range hits {
-		if hits[i].Session == nil || *hits[i].Session == 0 {
-			hits[i].Session = &one
+		if hits[i].Session.IsZero() {
+			hits[i].Session = goatcounter.TestSession
 		}
 		if hits[i].Site == 0 {
-			hits[i].Site = 1
+			hits[i].Site = siteID
+		}
+		if hits[i].Path == "" {
+			hits[i].Path = "/"
 		}
 	}
 
 	goatcounter.Memstore.Append(hits...)
 	hits, err := goatcounter.Memstore.Persist(ctx)
-	if err != nil {
-		t.Fatal(err)
+	if !wantFail && err != nil {
+		t.Fatalf("gctest.StoreHits failed: %s", err)
+	}
+	if wantFail && err == nil {
+		t.Fatal("gc.StoreHits: no error while wantError is true")
 	}
 
 	sites := make(map[int64]struct{})
@@ -228,7 +184,7 @@ func StoreHits(ctx context.Context, t *testing.T, hits ...goatcounter.Hit) []goa
 	}
 
 	for s := range sites {
-		err = cron.UpdateStats(ctx, s, hits)
+		err = cron.UpdateStats(ctx, nil, s, hits)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -237,35 +193,43 @@ func StoreHits(ctx context.Context, t *testing.T, hits ...goatcounter.Hit) []goa
 	return hits
 }
 
-func Site(ctx context.Context, t *testing.T, site goatcounter.Site) (context.Context, goatcounter.Site) {
-	if site.Code == "" {
-		site.Code = zhttp.Secret64()
-		if len(site.Code) > 50 {
-			site.Code = site.Code[:50]
-		}
+// Site creates a new user/site pair.
+//
+// You can set values for the site by passing the sute or user parameters, but
+// they may be nil to just set them to some sensible defaults.
+func Site(ctx context.Context, t *testing.T, site *goatcounter.Site, user *goatcounter.User) context.Context {
+	if site == nil {
+		site = &goatcounter.Site{}
 	}
-	if site.Plan == "" {
-		site.Plan = goatcounter.PlanPersonal
+	if user == nil {
+		user = &goatcounter.User{}
+	}
+
+	if site.Code == "" {
+		site.Code = "gctest-" + zcrypto.Secret64()
 	}
 
 	err := site.Insert(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx = goatcounter.WithSite(ctx, &site)
+	ctx = goatcounter.WithSite(ctx, site)
 
-	var user goatcounter.User
-	err = user.BySite(ctx, site.ID)
-	if err != nil {
-		user.Site = 1
+	user.Site = site.ID
+	if user.Email == "" {
 		user.Email = "test@example.com"
-		user.Password = []byte("coconuts")
-		err = user.Insert(ctx)
 	}
+	if len(user.Password) == 0 {
+		user.Password = []byte("coconuts")
+	}
+	if user.Access == nil {
+		user.Access = goatcounter.UserAccesses{"all": goatcounter.AccessAdmin}
+	}
+	err = user.Insert(ctx, false)
 	if err != nil {
 		t.Fatalf("get/create user: %s", err)
 	}
-	ctx = goatcounter.WithUser(ctx, &user)
+	ctx = goatcounter.WithUser(ctx, user)
 
-	return ctx, site
+	return ctx
 }

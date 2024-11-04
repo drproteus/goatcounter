@@ -1,31 +1,41 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 package main
 
 import (
-	"runtime"
-	"strings"
+	"io"
+	"net/http"
 	"testing"
 )
 
 func TestServe(t *testing.T) {
-	// I don't know why, but this doesn't work in Windows; I think it may be
-	// related to permission issues for binding to a port or some such?
-	if runtime.GOOS == "windows" {
-		t.Skip()
+	exit, _, _, _, dbc := startTest(t)
+
+	ready := make(chan struct{}, 1)
+	stop := make(chan struct{})
+	go runCmdStop(t, exit, ready, stop, "serve",
+		"-db="+dbc,
+		"-debug=all",
+		"-listen=localhost:31874",
+		"-tls=http")
+	<-ready
+
+	resp, err := http.Get("http://localhost:31874/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Errorf("status %d: %s", resp.StatusCode, b)
+	}
+	if len(b) < 100 {
+		t.Errorf("%s", b)
 	}
 
-	ctx, dbc, clean := tmpdb(t)
-	defer clean()
-
-	out, code := run(t, "serving", []string{"serve",
-		"-listen", "localhost:31874",
-		"-tls", "none",
-		"-db", dbc})
-	if code != 0 {
-		t.Fatalf("code is %d: %s", code, strings.Join(out, "\n"))
-	}
-	_ = ctx
+	stop <- struct{}{}
+	mainDone.Wait()
 }

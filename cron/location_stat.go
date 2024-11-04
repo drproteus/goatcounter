@@ -1,32 +1,25 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 package cron
 
 import (
 	"context"
+	"strconv"
 
 	"zgo.at/errors"
-	"zgo.at/goatcounter"
+	"zgo.at/goatcounter/v2"
 	"zgo.at/zdb"
-	"zgo.at/zdb/bulk"
 )
 
-// Location stats are stored as a simple day/location with a count.
-//  site |    day     | location | count
-// ------+------------+----------+-------
-//     1 | 2019-11-30 | ET       |     1
-//     1 | 2019-11-30 | GR       |     2
-//     1 | 2019-11-30 | MX       |     4
 func updateLocationStats(ctx context.Context, hits []goatcounter.Hit) error {
-	return zdb.TX(ctx, func(ctx context.Context, tx zdb.DB) error {
-		// Group by day + location.
+	return errors.Wrap(zdb.TX(ctx, func(ctx context.Context) error {
 		type gt struct {
-			count       int
-			countUnique int
-			day         string
-			location    string
+			count    int
+			day      string
+			location string
+			pathID   int64
 		}
 		grouped := map[string]gt{}
 		for _, h := range hits {
@@ -35,58 +28,42 @@ func updateLocationStats(ctx context.Context, hits []goatcounter.Hit) error {
 			}
 
 			day := h.CreatedAt.Format("2006-01-02")
-			k := day + h.Location
+			k := day + h.Location + strconv.FormatInt(h.PathID, 10)
 			v := grouped[k]
 			if v.count == 0 {
 				v.day = day
 				v.location = h.Location
-				var err error
-				v.count, v.countUnique, err = existingLocationStats(ctx, tx,
-					h.Site, day, v.location)
-				if err != nil {
-					return err
-				}
+				v.pathID = h.PathID
 			}
 
-			v.count += 1
+			// Call this for the side-effect of creating the rows in the
+			// locations table. Should be the case in almost all codepaths, but
+			// just to be sure. This is all cached, so there's very little
+			// overhead.
+			(&goatcounter.Location{}).ByCode(ctx, h.Location)
+
 			if h.FirstVisit {
-				v.countUnique += 1
+				v.count += 1
 			}
 			grouped[k] = v
 		}
 
 		siteID := goatcounter.MustGetSite(ctx).ID
-		ins := bulk.NewInsert(ctx, "location_stats", []string{"site", "day",
-			"location", "count", "count_unique"})
+		ins := zdb.NewBulkInsert(ctx, "location_stats", []string{"site_id", "day",
+			"path_id", "location", "count"})
+		if zdb.SQLDialect(ctx) == zdb.DialectPostgreSQL {
+			ins.OnConflict(`on conflict on constraint "location_stats#site_id#path_id#day#location" do update set
+				count = location_stats.count + excluded.count`)
+		} else {
+			ins.OnConflict(`on conflict(site_id, path_id, day, location) do update set
+				count = location_stats.count + excluded.count`)
+		}
+
 		for _, v := range grouped {
-			ins.Values(siteID, v.day, v.location, v.count, v.countUnique)
+			if v.count > 0 {
+				ins.Values(siteID, v.day, v.pathID, v.location, v.count)
+			}
 		}
 		return ins.Finish()
-	})
-}
-
-func existingLocationStats(
-	txctx context.Context, tx zdb.DB, siteID int64,
-	day, location string,
-) (int, int, error) {
-
-	var c []struct {
-		Count       int `db:"count"`
-		CountUnique int `db:"count_unique"`
-	}
-	err := tx.SelectContext(txctx, &c, `/* existingLocationStats */
-		select count, count_unique from location_stats
-		where site=$1 and day=$2 and location=$3 limit 1`,
-		siteID, day, location)
-	if err != nil {
-		return 0, 0, errors.Wrap(err, "select")
-	}
-	if len(c) == 0 {
-		return 0, 0, nil
-	}
-
-	_, err = tx.ExecContext(txctx, `delete from location_stats where
-		site=$1 and day=$2 and location=$3`,
-		siteID, day, location)
-	return c[0].Count, c[0].CountUnique, errors.Wrap(err, "delete")
+	}), "cron.updateLocationStats")
 }

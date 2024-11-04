@@ -1,6 +1,6 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 package handlers
 
@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,18 +17,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/v5"
 	"zgo.at/blackmail"
-	"zgo.at/goatcounter"
-	"zgo.at/goatcounter/cfg"
-	"zgo.at/goatcounter/gctest"
-	"zgo.at/goatcounter/pack"
+	"zgo.at/goatcounter/v2"
+	"zgo.at/goatcounter/v2/gctest"
 	"zgo.at/zdb"
 	"zgo.at/zhttp"
 	"zgo.at/zlog"
+	"zgo.at/zstd/zgo"
 	"zgo.at/zstd/zjson"
-	"zgo.at/zstd/zstring"
-	"zgo.at/ztest"
+	"zgo.at/zstd/zruntime"
+	"zgo.at/zstd/ztest"
+	"zgo.at/ztpl"
 )
 
 type handlerTest struct {
@@ -37,29 +38,55 @@ type handlerTest struct {
 	path         string
 	method       string
 	auth         bool
-	body         interface{}
+	body         any
 	wantCode     int
 	wantFormCode int
 	wantBody     string
 	wantFormBody string
+	want         string
+	serve        bool
 }
 
 func init() {
 	blackmail.DefaultMailer = blackmail.NewMailer(blackmail.ConnectWriter,
 		blackmail.MailerOut(new(bytes.Buffer)))
 
-	zhttp.TplPath = "../tpl"
-	pack.Templates = nil
-	pack.Public = nil
-	zhttp.InitTpl(nil)
+	files, _ := fs.Sub(os.DirFS(zgo.ModuleRoot()), "tpl")
+	err := ztpl.Init(files)
+	if err != nil {
+		panic(err)
+	}
+
 	ztest.DefaultHost = "test.example.com"
-	cfg.Domain = "example.com"
-	cfg.GoatcounterCom = true
-	if zstring.Contains(os.Args, "-test.v=true") {
+	if zruntime.TestVerbose() {
 		zlog.Config.Debug = []string{"all"}
 	} else {
 		zlog.Config.Outputs = []zlog.OutputFunc{} // Don't care about logs; don't spam.
 	}
+}
+
+func TestMain(m *testing.M) {
+	os.Exit(ztpl.TestTemplateExecution(m,
+		// Don't need tests.
+		"", "bosmang.gohtml", "bosmang_site.gohtml", "bosmang_cache.gohtml",
+		"bosmang_bgrun.gohtml", "bosmang_metrics.gohtml", "bosmang_sites.gohtml",
+		"i18n_list.gohtml", "i18n_show.gohtml", "i18n_manage.gohtml",
+
+		// Tested in tpl_test.go
+		"email_export_done.gotxt", "email_forgot_site.gotxt",
+		"email_import_done.gotxt", "email_import_error.gotxt",
+		"email_password_reset.gotxt", "email_verify.gotxt",
+		"email_adduser.gotxt", "_email_bottom.gohtml", "email_report.gohtml",
+		"email_report.gotxt",
+
+		// TODO
+		"_dashboard_pages_refs.gohtml",
+		"_dashboard_pages_text.gohtml",
+		"_dashboard_pages_text_rows.gohtml",
+		"settings_server.gohtml",
+		"_dashboard_configure_widget.gohtml",
+		"_user_dashboard_widget.gohtml",
+	))
 }
 
 func runTest(
@@ -67,6 +94,7 @@ func runTest(
 	tt handlerTest,
 	fun func(*testing.T, *httptest.ResponseRecorder, *http.Request),
 ) {
+	t.Helper()
 	if tt.method == "" {
 		tt.method = "GET"
 	}
@@ -82,8 +110,8 @@ func runTest(
 
 		if tt.wantCode > 0 {
 			t.Run(sn, func(t *testing.T) {
-				ctx, clean := gctest.DB(t)
-				defer clean()
+				ctx := gctest.DB(t)
+				goatcounter.Config(ctx).GoatcounterCom = !tt.serve
 
 				r, rr := newTest(ctx, tt.method, tt.path, bytes.NewReader(zjson.MustMarshal(tt.body)))
 				if tt.setup != nil {
@@ -93,7 +121,7 @@ func runTest(
 					login(t, r)
 				}
 
-				tt.router(zdb.MustGet(ctx)).ServeHTTP(rr, r)
+				tt.router(zdb.MustGetDB(ctx)).ServeHTTP(rr, r)
 				ztest.Code(t, rr, tt.wantCode)
 				if !strings.Contains(rr.Body.String(), tt.wantBody) {
 					t.Errorf("wrong body\nwant: %s\ngot:  %s", tt.wantBody, rr.Body.String())
@@ -111,8 +139,8 @@ func runTest(
 		}
 
 		t.Run("form", func(t *testing.T) {
-			ctx, clean := gctest.DB(t)
-			defer clean()
+			ctx := gctest.DB(t)
+			goatcounter.Config(ctx).GoatcounterCom = !tt.serve
 
 			form := formBody(tt.body)
 			r, rr := newTest(ctx, tt.method, tt.path, strings.NewReader(form))
@@ -125,7 +153,10 @@ func runTest(
 				login(t, r)
 			}
 
-			tt.router(zdb.MustGet(ctx)).ServeHTTP(rr, r)
+			tt.router(zdb.MustGetDB(ctx)).ServeHTTP(rr, r)
+			if f := zhttp.ReadFlash(rr, r); f != nil {
+				t.Logf("flash message (%s): %s", f.Level, f.Message)
+			}
 			ztest.Code(t, rr, tt.wantFormCode)
 			if !strings.Contains(rr.Body.String(), tt.wantFormBody) {
 				t.Errorf("wrong body\nwant: %q\ngot:  %q", tt.wantFormBody, rr.Body.String())
@@ -142,9 +173,8 @@ func runTest(
 func login(t *testing.T, r *http.Request) {
 	t.Helper()
 
-	u := goatcounter.GetUser(r.Context())
-
 	// Login user
+	u := User(r.Context())
 	err := u.Login(r.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -161,16 +191,16 @@ func login(t *testing.T, r *http.Request) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.Form.Set("csrf", *u.CSRFToken)
+	r.Form.Set("csrf", *u.Token)
 
 	r.Header.Set("Cookie", "key="+*u.LoginToken)
 }
 
 func newTest(ctx context.Context, method, path string, body io.Reader) (*http.Request, *httptest.ResponseRecorder) {
-	site := goatcounter.MustGetSite(ctx)
+	site := Site(ctx)
 	r, rr := ztest.NewRequest(method, path, body).WithContext(ctx), httptest.NewRecorder()
 	r.Header.Set("User-Agent", "GoatCounter test runner/1.0")
-	r.Host = site.Code + "." + cfg.Domain
+	r.Host = site.Code + "." + goatcounter.Config(ctx).Domain
 	return r, rr
 }
 
@@ -179,7 +209,7 @@ func newTest(ctx context.Context, method, path string, body io.Reader) (*http.Re
 // Use github.com/teamwork/test.Multipart for a multipart form.
 //
 // Note: this is primitive, but enough for now.
-func formBody(i interface{}) string {
+func formBody(i any) string {
 	var m map[string]string
 	zjson.MustUnmarshal(zjson.MustMarshal(i), &m)
 

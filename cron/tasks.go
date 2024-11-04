@@ -1,6 +1,6 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 package cron
 
@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"zgo.at/errors"
-	"zgo.at/goatcounter"
-	"zgo.at/goatcounter/acme"
-	"zgo.at/goatcounter/cfg"
+	"zgo.at/goatcounter/v2"
+	"zgo.at/goatcounter/v2/acme"
 	"zgo.at/zdb"
 	"zgo.at/zlog"
+	"zgo.at/zstd/ztime"
 )
 
 func oldExports(ctx context.Context) error {
@@ -44,7 +44,7 @@ func oldExports(ctx context.Context) error {
 			continue
 		}
 
-		if st.ModTime().Before(goatcounter.Now().Add(-24 * time.Hour)) {
+		if st.ModTime().Before(ztime.Now().Add(-24 * time.Hour)) {
 			err := os.Remove(f)
 			if err != nil {
 				zlog.Errorf("cron.oldExports: %s", err)
@@ -55,9 +55,9 @@ func oldExports(ctx context.Context) error {
 	return nil
 }
 
-func DataRetention(ctx context.Context) error {
+func dataRetention(ctx context.Context) error {
 	var sites goatcounter.Sites
-	err := sites.List(ctx)
+	err := sites.UnscopedList(ctx)
 	if err != nil {
 		return err
 	}
@@ -76,8 +76,18 @@ func DataRetention(ctx context.Context) error {
 	return nil
 }
 
+func oldBot(ctx context.Context) error {
+	ival := goatcounter.Interval(ctx, 30)
+	err := zdb.Exec(ctx, `delete from hits where bot > 0 and created_at < `+ival)
+	if err != nil {
+		zlog.Module("cron").Error(err)
+	}
+	return nil
+}
+
 func persistAndStat(ctx context.Context) error {
 	l := zlog.Module("cron")
+	l.Debug("persistAndStat started")
 
 	hits, err := goatcounter.Memstore.Persist(ctx)
 	if err != nil {
@@ -95,7 +105,7 @@ func persistAndStat(ctx context.Context) error {
 		grouped[h.Site] = append(grouped[h.Site], h)
 	}
 	for siteID, hits := range grouped {
-		err := UpdateStats(ctx, siteID, hits)
+		err := UpdateStats(ctx, nil, siteID, hits)
 		if err != nil {
 			l.Fields(zlog.F{
 				"site":  siteID,
@@ -104,101 +114,50 @@ func persistAndStat(ctx context.Context) error {
 		}
 	}
 
-	if len(hits) > 100 {
-		l.Since("stats").FieldsSince().Printf("persisted %d hits", len(hits))
+	if len(hits) > 0 {
+		l.Since("stats").FieldsSince().Debugf("persisted %d hits", len(hits))
 	}
 	return err
 }
 
-func UpdateStats(ctx context.Context, siteID int64, hits []goatcounter.Hit) error {
-	var site goatcounter.Site
-	err := site.ByID(ctx, siteID)
-	if err != nil {
-		return err
+// UpdateStats updates all the stats tables.
+//
+// Exported for tests.
+func UpdateStats(ctx context.Context, site *goatcounter.Site, siteID int64, hits []goatcounter.Hit) error {
+	if site == nil {
+		site = new(goatcounter.Site)
+		err := site.ByID(ctx, siteID)
+		if err != nil {
+			return err
+		}
 	}
-	ctx = goatcounter.WithSite(ctx, &site)
+	ctx = goatcounter.WithSite(ctx, site)
 
-	err = updateHitStats(ctx, hits)
-	if err != nil {
-		return errors.Wrapf(err, "hit_stat: site %d", siteID)
+	funs := []func(context.Context, []goatcounter.Hit) error{
+		updateHitCounts,
+		updateRefCounts,
+		updateHitStats,
+		updateBrowserStats,
+		updateSystemStats,
+		updateLocationStats,
+		updateLanguageStats,
+		updateSizeStats,
+		updateCampaignStats,
 	}
-	err = updateHitCounts(ctx, hits)
-	if err != nil {
-		return errors.Wrapf(err, "hit_count: site %d", siteID)
-	}
-	err = updateBrowserStats(ctx, hits)
-	if err != nil {
-		return errors.Wrapf(err, "browser_stat: site %d", siteID)
-	}
-	err = updateSystemStats(ctx, hits)
-	if err != nil {
-		return errors.Wrapf(err, "browser_stat: site %d", siteID)
-	}
-	err = updateLocationStats(ctx, hits)
-	if err != nil {
-		return errors.Wrapf(err, "location_stat: site %d", siteID)
-	}
-	err = updateRefCounts(ctx, hits)
-	if err != nil {
-		return errors.Wrapf(err, "ref_count: site %d", siteID)
-	}
-	err = updateSizeStats(ctx, hits)
-	if err != nil {
-		return errors.Wrapf(err, "size_stat: site %d", siteID)
+
+	for _, f := range funs {
+		err := f(ctx, hits)
+		if err != nil {
+			return errors.Wrapf(err, "site %d", siteID)
+		}
 	}
 
 	if !site.ReceivedData {
-		_, err = zdb.MustGet(ctx).ExecContext(ctx,
-			`update sites set received_data=1 where id=$1`, siteID)
+		err := site.UpdateReceivedData(ctx)
 		if err != nil {
 			return errors.Wrapf(err, "update received_data: site %d", siteID)
 		}
 	}
-	return nil
-}
-
-func ReindexStats(ctx context.Context, hits []goatcounter.Hit, tables []string) error {
-	grouped := make(map[int64][]goatcounter.Hit)
-	for _, h := range hits {
-		grouped[h.Site] = append(grouped[h.Site], h)
-	}
-
-	for siteID, hits := range grouped {
-		var site goatcounter.Site
-		err := site.ByID(ctx, siteID)
-		if err != nil {
-			if zdb.ErrNoRows(err) { // Deleted site.
-				continue
-			}
-			return errors.Errorf("cron.ReindexStats: %w", err)
-		}
-		ctx = goatcounter.WithSite(ctx, &site)
-
-		for _, t := range tables {
-			switch t {
-			case "all":
-				err = UpdateStats(ctx, siteID, hits)
-			case "hit_stats":
-				err = updateHitStats(ctx, hits)
-			case "hit_counts":
-				err = updateHitCounts(ctx, hits)
-			case "browser_stats":
-				err = updateBrowserStats(ctx, hits)
-			case "system_stats":
-				err = updateSystemStats(ctx, hits)
-			case "location_stats":
-				err = updateLocationStats(ctx, hits)
-			case "ref_counts":
-				err = updateRefCounts(ctx, hits)
-			case "size_stats":
-				err = updateSizeStats(ctx, hits)
-			}
-			if err != nil {
-				return err
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -213,31 +172,29 @@ func renewACME(ctx context.Context) error {
 	}
 
 	var sites goatcounter.Sites
-	err := sites.ListCnames(ctx)
+	err := sites.UnscopedListCnames(ctx)
 	if err != nil {
 		return err
 	}
 
 	for _, s := range sites {
-		wg.Add(1)
-		go func(ctx context.Context, s goatcounter.Site) {
-			defer wg.Done()
-			err := acme.Make(*s.Cname)
-			if err != nil {
-				zlog.Module("cron-acme").Error(err)
-				return
-			}
+		err := acme.Make(ctx, *s.Cname)
+		if err != nil {
+			zlog.Module("cron-acme").Field("cname", *s.Cname).Error(err)
+			continue
+		}
 
-			err = s.UpdateCnameSetupAt(ctx)
-			if err != nil {
-				zlog.Module("cron-acme").Error(err)
-			}
-		}(ctx, s)
+		err = s.UpdateCnameSetupAt(ctx)
+		if err != nil {
+			zlog.Module("cron-acme").Field("cname", *s.Cname).Error(err)
+			continue
+		}
 	}
 
 	return nil
 }
 
+// Permanently delete soft-deleted sites.
 func vacuumDeleted(ctx context.Context) error {
 	var sites goatcounter.Sites
 	err := sites.OldSoftDeleted(ctx)
@@ -247,16 +204,18 @@ func vacuumDeleted(ctx context.Context) error {
 
 	for _, s := range sites {
 		zlog.Module("vacuum").Printf("vacuum site %s/%d", s.Code, s.ID)
+		err := zdb.TX(ctx, func(ctx context.Context) error {
+			for _, t := range []string{"hits", "paths",
+				"hit_counts", "ref_counts",
+				"browser_stats", "system_stats", "hit_stats", "location_stats", "language_stats", "size_stats",
+				"campaign_stats", "exports", "api_tokens", "users", "sites"} {
 
-		err := zdb.TX(ctx, func(ctx context.Context, db zdb.DB) error {
-			for _, t := range []string{"browser_stats", "system_stats", "hit_stats", "sessions", "hits", "location_stats", "size_stats", "users"} {
-				_, err := db.ExecContext(ctx, fmt.Sprintf(`delete from %s where site=%d`, t, s.ID))
+				err := zdb.Exec(ctx, fmt.Sprintf(`delete from %s where site_id=%d`, t, s.ID))
 				if err != nil {
 					return errors.Errorf("%s: %w", t, err)
 				}
 			}
-			_, err := db.ExecContext(ctx, `delete from sites where id=$1`, s.ID)
-			return err
+			return nil
 		})
 		if err != nil {
 			return errors.Errorf("vacuumDeleted: %w", err)
@@ -265,13 +224,7 @@ func vacuumDeleted(ctx context.Context) error {
 	return nil
 }
 
-func clearSessions(ctx context.Context) error {
-	query := `delete from sessions where last_seen < `
-	if cfg.PgSQL {
-		query += `now() - interval '1 hour'`
-	} else {
-		query += `datetime(datetime(), '-1 hours')`
-	}
-	_, err := zdb.MustGet(ctx).ExecContext(ctx, query)
-	return err
+func sessions(ctx context.Context) error {
+	goatcounter.Memstore.EvictSessions()
+	return nil
 }

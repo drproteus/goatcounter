@@ -1,54 +1,25 @@
 	</div> {{- /* .page */}}
-	{{template "_bottom_links.gohtml" .}}
-	{{if and .User.ID .Billing (eq .Path "/") (.Site.ShowPayBanner .Context)}}
-		<div id="trial-expired">
-			<p>Hey hey; you’ve been using GoatCounter for more than 14 days.
-			Please consider making a small donation to cover development costs,
-			or subscribe to a plan if you’re using it for commercial
-			websites.</p>
 
-			<p>Choose if you want to subscribe on a plan or continue with the
-			free plan on the
-			{{if .Site.Parent}}
-				<a href="{{parent_site .Context .Site.Parent}}/billing">the parent’s billing page</a>
-			{{else}}
-				<a href="/billing">billing page</a>
-			{{end}}
-			to make this banner go away.
-			<a href="https://www.goatcounter.com/contact" target="_blank">Let me
-				know</a> if you have any questions or comments.</p>
-		</div>
+	{{if or (.User.ID) (not .HideUI)}}
+		{{template "_bottom_links.gohtml" .}}
 	{{end}}
+
 	<span id="js-settings"
-		data-offset="{{.Site.Settings.Timezone.Offset}}"
-		data-created="{{.Site.CreatedAt.Unix}}"
+		data-offset="{{.User.Settings.Timezone.Offset}}"
+		data-first-hit-at="{{.Site.FirstHitAt.Unix}}"
+		data-websocket="{{.Websocket}}"
+		{{if .Base}}data-base-path="{{.Base}}"{{end}}
 		{{if .User.ID}}data-csrf="{{.User.CSRFToken}}"{{end}}
 	>
-		{{- .Site.Settings.String | unsafe_js -}}
+		{{- .User.Settings.String | unsafe_js -}}
 	</span>
+	<span id="js-i18n">{{.JSTranslations | json}}</span>
 
 	<script crossorigin="anonymous" src="{{.Static}}/jquery.js?v={{.Version}}"></script>
 	<script crossorigin="anonymous" src="{{.Static}}/pikaday.js?v={{.Version}}"></script>
-	<script crossorigin="anonymous" src="{{.Static}}/script_backend.js?v={{.Version}}"></script>
-
-	{{if and .GoatcounterCom (not .Dev)}}
-		<script>
-			window.goatcounter = {
-				title:       function() { return null },
-				referrer:    function() { return null },
-				no_onload:   localStorage.getItem('skipgc') === 't',
-				allow_local: true,
-			}
-		</script>
-		{{if .Dev}}
-			<script data-goatcounter="http://gc.{{.Domain}}/count"
-					async src="{{.Static}}/count.js"></script>
-			<noscript><img src="http://gc.{{.Domain}}/count?p=/noscript-{{.Site.Code | hash}}" alt="" style="float:right"></noscript>
-		{{else}}
-			<script data-goatcounter="https://gc.goatcounter.com/count"
-					async src="https://gc.zgo.at/count.js"></script>
-			<noscript><img src="https://gc.goatcounter.com/count?p=/noscript-{{.Site.Code | hash}}" alt="" style="float:right"></noscript>
-		{{end}}
-	{{end}}
+	<script crossorigin="anonymous" src="{{.Static}}/charty.js?v={{.Version}}"></script>
+	<script crossorigin="anonymous" src="{{.Static}}/helper.js?v={{.Version}}"></script>
+	<script crossorigin="anonymous" src="{{.Static}}/dashboard.js?v={{.Version}}"></script>
+	<script crossorigin="anonymous" src="{{.Static}}/backend.js?v={{.Version}}"></script>
 </body>
 </html>

@@ -1,0 +1,17 @@
+[__meta__]
+  generated = 2021-11-25T14:01:49Z
+  language = "en-GB"
+  maintainers = ["Martin Tournoij <martin@arp242.net>"]
+  no-update = true
+
+["dashboard/day-ago"]
+  default = "%(n) days ago"
+  one     = "1 day ago"
+
+["dashboard/week-ago"]
+  default = "%(n) weeks ago"
+  one     = "1 week ago"
+
+["dashboard/month-ago"]
+  default = "%(n) months ago"
+  one     = "1 month ago"

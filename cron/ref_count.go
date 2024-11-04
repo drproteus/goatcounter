@@ -1,28 +1,26 @@
-// Copyright © 2019 Martin Tournoij – This file is part of GoatCounter and
-// published under the terms of a slightly modified EUPL v1.2 license, which can
-// be found in the LICENSE file or at https://license.goatcounter.com
+// Copyright © Martin Tournoij – This file is part of GoatCounter and published
+// under the terms of a slightly modified EUPL v1.2 license, which can be found
+// in the LICENSE file or at https://license.goatcounter.com
 
 package cron
 
 import (
 	"context"
+	"strconv"
 
 	"zgo.at/errors"
-	"zgo.at/goatcounter"
-	"zgo.at/goatcounter/cfg"
+	"zgo.at/goatcounter/v2"
 	"zgo.at/zdb"
 )
 
 func updateRefCounts(ctx context.Context, hits []goatcounter.Hit) error {
-	return zdb.TX(ctx, func(ctx context.Context, tx zdb.DB) error {
-		// Group by day + path + ref.
+	return errors.Wrap(zdb.TX(ctx, func(ctx context.Context) error {
+		// Group by day + pathID + ref.
 		type gt struct {
-			total       int
-			totalUnique int
-			hour        string
-			path        string
-			ref         string
-			refScheme   *string
+			total  int
+			hour   string
+			pathID int64
+			refID  int64
 		}
 		grouped := map[string]gt{}
 		for _, h := range hits {
@@ -31,77 +29,34 @@ func updateRefCounts(ctx context.Context, hits []goatcounter.Hit) error {
 			}
 
 			hour := h.CreatedAt.Format("2006-01-02 15:00:00")
-			k := hour + h.Path + h.Ref
+			k := hour + strconv.FormatInt(h.PathID, 10) + strconv.FormatInt(h.RefID, 10)
 			v := grouped[k]
 			if v.total == 0 {
 				v.hour = hour
-				v.path = h.Path
-				v.ref = h.Ref
-				v.refScheme = h.RefScheme
-				var err error
-				v.total, v.totalUnique, err = existingRefCounts(ctx, tx,
-					h.Site, hour, v.path, v.ref)
-				if err != nil {
-					return err
-				}
+				v.pathID = h.PathID
+				v.refID = h.RefID
 			}
 
-			v.total += 1
 			if h.FirstVisit {
-				v.totalUnique += 1
+				v.total += 1
 			}
 			grouped[k] = v
 		}
 
 		siteID := goatcounter.MustGetSite(ctx).ID
+		ins := zdb.NewBulkInsert(ctx, "ref_counts", []string{"site_id", "path_id",
+			"ref_id", "hour", "total"})
+		if zdb.SQLDialect(ctx) == zdb.DialectPostgreSQL {
+			ins.OnConflict(`on conflict on constraint "ref_counts#site_id#path_id#ref_id#hour" do update set
+				total = ref_counts.total + excluded.total`)
+		} else {
+			ins.OnConflict(`on conflict(site_id, path_id, ref_id, hour) do update set
+				total = ref_counts.total + excluded.total`)
+		}
+
 		for _, v := range grouped {
-			var err error
-			if cfg.PgSQL {
-				_, err = zdb.MustGet(ctx).ExecContext(ctx, `insert into ref_counts
-				(site, path, ref, hour, total, total_unique, ref_scheme) values ($1, $2, $3, $4, $5, $6, $7)
-				on conflict on constraint "ref_counts#site#path#ref#hour" do
-					update set total=$8, total_unique=$9`,
-					siteID, v.path, v.ref, v.hour, v.total, v.totalUnique, v.refScheme,
-					v.total, v.totalUnique)
-			} else {
-				// SQLite has "on conflict replace" on the unique constraint to
-				// do the same.
-				_, err = zdb.MustGet(ctx).ExecContext(ctx, `insert into ref_counts
-					(site, path, ref, hour, total, total_unique, ref_scheme) values ($1, $2, $3, $4, $5, $6, $7)`,
-					siteID, v.path, v.ref, v.hour, v.total, v.totalUnique, v.refScheme)
-			}
-			if err != nil {
-				return errors.Wrap(err, "updateRefCounts ref_counts")
-			}
+			ins.Values(siteID, v.pathID, v.refID, v.hour, v.total)
 		}
-		return nil
-	})
-}
-
-func existingRefCounts(
-	txctx context.Context, tx zdb.DB, siteID int64,
-	hour, path, ref string,
-) (int, int, error) {
-
-	var t, tu int
-	row := tx.QueryRowxContext(txctx, `/* existingRefCounts */
-		select total, total_unique from ref_counts
-		where site=$1 and hour=$2 and path=$3 and ref=$4 limit 1`,
-		siteID, hour, path, ref)
-	if err := row.Err(); err != nil {
-		if zdb.ErrNoRows(err) {
-			return 0, 0, nil
-		}
-		return 0, 0, errors.Wrap(err, "existingRefCounts")
-	}
-
-	err := row.Scan(&t, &tu)
-	if err != nil {
-		if zdb.ErrNoRows(err) {
-			return 0, 0, nil
-		}
-		return 0, 0, errors.Wrap(err, "existingRefCounts")
-	}
-
-	return t, tu, nil
+		return ins.Finish()
+	}), "cron.updateRefCounts")
 }
